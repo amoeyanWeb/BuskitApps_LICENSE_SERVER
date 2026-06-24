@@ -57,7 +57,13 @@ app.post('/activate', async (req, res) => {
         const licenseData = licenseDoc.data();
 
         if (licenseData.is_used) {
-            return res.status(403).json({ error: 'این کد لایسنس قبلاً استفاده شده' });
+            // اگه همون گوشیه → مجاز (نصب مجدد)
+            if (licenseData.fingerprint === fingerprint) {
+                const token = createSignedToken(fingerprint, licenseCode);
+                return res.status(200).json({ success: true, token });
+            }
+            // گوشی دیگه‌ای → رد کن
+            return res.status(403).json({ error: 'این کد لایسنس قبلاً روی دستگاه دیگری فعال شده است' });
         }
 
         await licenseRef.update({
