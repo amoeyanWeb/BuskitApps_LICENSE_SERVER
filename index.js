@@ -26,6 +26,11 @@ const LICENSE_DURATIONS = {
     '5days':    5   * 24 * 60 * 60 * 1000,
 };
 
+// ── fingerprint رو برای Firestore document ID ایمن کن ────────────────────
+function toSafeId(fingerprint) {
+    return fingerprint.replace(/\//g, '_').replace(/\+/g, '-').replace(/=/g, '');
+}
+
 // ── ساخت token امضاشده ───────────────────────────────────────────────────
 function createSignedToken(fingerprint, licenseCode, licenseType, expiresAt) {
     const payload = JSON.stringify({
@@ -66,12 +71,13 @@ app.post('/activate', async (req, res) => {
         }
 
         const durationMs = LICENSE_DURATIONS[licenseType];
+        const safeId = toSafeId(fingerprint);
 
         // ════════════════════════════════════════════════════════════════
         // حالت ۱: لایسنس مشترک (is_shared = true) — مثل کد رایگان ۵ روزه
         // ════════════════════════════════════════════════════════════════
         if (isShared) {
-            const userRef = licenseRef.collection('users').doc(fingerprint);
+            const userRef = licenseRef.collection('users').doc(safeId);
             const userDoc = await userRef.get();
 
             if (userDoc.exists) {
@@ -183,6 +189,7 @@ app.post('/verify', async (req, res) => {
         const data = licenseDoc.data();
         const licenseType = data.license_type ?? 'lifetime';
         const isShared    = data.is_shared === true;
+        const safeId = toSafeId(fingerprint);
 
         // مادام‌العمر نیازی به verify آنلاین نداره
         if (licenseType === 'lifetime') {
@@ -191,7 +198,7 @@ app.post('/verify', async (req, res) => {
 
         // لایسنس مشترک (shared) — چک کن این fingerprint ثبت شده و منقضی نشده
         if (isShared) {
-            const userRef = licenseRef.collection('users').doc(fingerprint);
+            const userRef = licenseRef.collection('users').doc(safeId);
             const userDoc = await userRef.get();
 
             if (!userDoc.exists) {
