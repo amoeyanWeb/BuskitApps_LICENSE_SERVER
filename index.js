@@ -58,7 +58,9 @@ async function linkDevice(fingerprint, licenseType, licenseCode) {
     const safeId = toSafeId(fingerprint);
     await db.collection('devices').doc(safeId).set({
         fingerprint,
-        [`links.${licenseType}`]: licenseCode,
+        links: {
+            [licenseType]: licenseCode
+        },
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
     }, { merge: true });
 }
