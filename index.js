@@ -26,12 +26,17 @@ const LICENSE_DURATIONS = {
     '5days':    5   * 24 * 60 * 60 * 1000,
 };
 
+// ترتیب اولویت چک در زمان ساین‌این: مادام‌العمر > سالانه > ماهانه > رایگان
+const TIER_ORDER = ['lifetime', '1year', '1month', '5days'];
+
 // ── fingerprint رو برای Firestore document ID ایمن کن ────────────────────
 function toSafeId(fingerprint) {
     return fingerprint.replace(/\//g, '_').replace(/\+/g, '-').replace(/=/g, '');
 }
 
-// ── ساخت token امضاشده ───────────────────────────────────────────────────
+// ── ساخت token امضاشده (RSA-SHA256) ──────────────────────────────────────
+// این امضا تنها چیزیه که جلوی جعل/دستکاری توکن توسط کلاینت رو می‌گیره،
+// چون کلید خصوصی فقط روی سرور وجود داره.
 function createSignedToken(fingerprint, licenseCode, licenseType, expiresAt) {
     const payload = JSON.stringify({
         fingerprint,
@@ -46,10 +51,22 @@ function createSignedToken(fingerprint, licenseCode, licenseType, expiresAt) {
     return Buffer.from(payload).toString('base64') + '|' + signature;
 }
 
-// ── مسیر فعال‌سازی ────────────────────────────────────────────────────────
+// ── ثبت/به‌روزرسانی ایندکس devices/{fingerprint} ─────────────────────────
+// این ایندکس باعث میشه /signin بتونه با یک خوندن بفهمه این گوشی
+// توی کدوم سطح(ها)ی لایسنس عضویت داره، بدون اسکن کل کالکشن licenses.
+async function linkDevice(fingerprint, licenseType, licenseCode) {
+    const safeId = toSafeId(fingerprint);
+    await db.collection('devices').doc(safeId).set({
+        fingerprint,
+        [`links.${licenseType}`]: licenseCode,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+}
+
+// ── مسیر فعال‌سازی (ساین‌آپ - وقتی کاربر کد لایسنس رو دستی وارد می‌کنه) ──
 app.post('/activate', async (req, res) => {
     try {
-        const { licenseCode, fingerprint } = req.body;
+        const { licenseCode, fingerprint, hardwareSignature } = req.body;
 
         if (!licenseCode || !fingerprint) {
             return res.status(400).json({ error: 'License code and fingerprint are required' });
@@ -86,21 +103,23 @@ app.post('/activate', async (req, res) => {
                     ? userData.expires_at.toMillis()
                     : null;
 
-                // هنوز در بازه → نصب مجدد مجازه
+                // هنوز در بازه → نصب مجدد مجازه، یک توکن تازه با همون expiresAt قبلی صادر میشه
                 if (expiresAt === null || Date.now() <= expiresAt) {
-                    const token = createSignedToken(
-                        fingerprint, licenseCode, licenseType, expiresAt
-                    );
-                    return res.status(200).json({ success: true, token, licenseType, expiresAt });
+                    const token = createSignedToken(fingerprint, licenseCode, licenseType, expiresAt);
+                    await linkDevice(fingerprint, licenseType, licenseCode);
+                    return res.status(200).json({ success: true, token, licenseType, licenseCode, expiresAt });
                 }
 
-                // بازه تموم شده → رد کن
+                // بازه تموم شده → رد کن (آنینستال/نصب مجدد نباید ۵ روز تازه بده)
                 return res.status(403).json({
                     error: 'You have already used your free trial. Please purchase a license to continue.'
                 });
             }
 
-            // اولین بار این fingerprint → ثبت کن
+            // اولین بار این fingerprint میاد سراغ trial → ثبت کن
+            // hardwareSignature هم ذخیره میشه فقط برای بررسی دستی آینده
+            // (مثلاً اگه یک روز الگوی مشکوک از تعداد ترایال‌های یک مدل خاص دیده شد)
+            // — فعلاً هیچ بلاکی بر اساسش انجام نمیشه.
             const now = Date.now();
             const expiresAt = durationMs !== null ? now + durationMs : null;
             const expiresAtFirestore = expiresAt !== null
@@ -109,36 +128,34 @@ app.post('/activate', async (req, res) => {
 
             await userRef.set({
                 fingerprint,
+                hardwareSignature: hardwareSignature || null,
                 activated_at: admin.firestore.FieldValue.serverTimestamp(),
                 expires_at: expiresAtFirestore
             });
 
-            // شمارنده کل کاربران رایگان
             await licenseRef.update({
                 total_activations: admin.firestore.FieldValue.increment(1)
             });
 
-            const token = createSignedToken(
-                fingerprint, licenseCode, licenseType, expiresAt
-            );
-            return res.status(200).json({ success: true, token, licenseType, expiresAt });
+            const token = createSignedToken(fingerprint, licenseCode, licenseType, expiresAt);
+            await linkDevice(fingerprint, licenseType, licenseCode);
+            return res.status(200).json({ success: true, token, licenseType, licenseCode, expiresAt });
         }
 
         // ════════════════════════════════════════════════════════════════
-        // حالت ۲: لایسنس اختصاصی (is_shared = false) — منطق قبلی
+        // حالت ۲: لایسنس اختصاصی (is_shared = false)
         // ════════════════════════════════════════════════════════════════
         if (data.is_used) {
             if (data.fingerprint === fingerprint) {
                 const expiresAt = data.expires_at ? data.expires_at.toMillis() : null;
 
                 if (expiresAt !== null && Date.now() > expiresAt) {
-                    return res.status(403).json({
-                        error: 'Your license has expired'
-                    });
+                    return res.status(403).json({ error: 'Your license has expired' });
                 }
 
                 const token = createSignedToken(fingerprint, licenseCode, licenseType, expiresAt);
-                return res.status(200).json({ success: true, token, licenseType, expiresAt });
+                await linkDevice(fingerprint, licenseType, licenseCode);
+                return res.status(200).json({ success: true, token, licenseType, licenseCode, expiresAt });
             }
 
             return res.status(403).json({
@@ -162,7 +179,8 @@ app.post('/activate', async (req, res) => {
         });
 
         const token = createSignedToken(fingerprint, licenseCode, licenseType, expiresAt);
-        return res.status(200).json({ success: true, token, licenseType, expiresAt });
+        await linkDevice(fingerprint, licenseType, licenseCode);
+        return res.status(200).json({ success: true, token, licenseType, licenseCode, expiresAt });
 
     } catch (err) {
         console.error('خطا در فعال‌سازی:', err);
@@ -170,67 +188,69 @@ app.post('/activate', async (req, res) => {
     }
 });
 
-// ── مسیر تأیید لایسنس (برای لایسنس‌های زمان‌دار) ─────────────────────────
-app.post('/verify', async (req, res) => {
+// ── مسیر ساین‌این (هر بار اجرای اپ — فقط fingerprint می‌فرسته) ───────────
+// ترتیب چک: lifetime → 1year → 1month → 5days
+// به محض پیدا شدن یک سطح (حتی اگه منقضی باشه)، به سطح‌های پایین‌تر نمیریم.
+app.post('/signin', async (req, res) => {
     try {
-        const { licenseCode, fingerprint } = req.body;
+        const { fingerprint } = req.body;
 
-        if (!licenseCode || !fingerprint) {
-            return res.status(400).json({ error: 'Missing required fields' });
+        if (!fingerprint) {
+            return res.status(400).json({ status: 'error', error: 'Fingerprint is required' });
         }
 
-        const licenseRef = db.collection('licenses').doc(licenseCode);
-        const licenseDoc = await licenseRef.get();
-
-        if (!licenseDoc.exists) {
-            return res.status(404).json({ valid: false, error: 'License not found' });
-        }
-
-        const data = licenseDoc.data();
-        const licenseType = data.license_type ?? 'lifetime';
-        const isShared    = data.is_shared === true;
         const safeId = toSafeId(fingerprint);
+        const deviceDoc = await db.collection('devices').doc(safeId).get();
 
-        // مادام‌العمر نیازی به verify آنلاین نداره
-        if (licenseType === 'lifetime') {
-            return res.status(200).json({ valid: true, licenseType });
+        if (!deviceDoc.exists) {
+            return res.status(200).json({ status: 'signup_required' });
         }
 
-        // لایسنس مشترک (shared) — چک کن این fingerprint ثبت شده و منقضی نشده
-        if (isShared) {
-            const userRef = licenseRef.collection('users').doc(safeId);
-            const userDoc = await userRef.get();
+        const links = deviceDoc.data().links || {};
 
-            if (!userDoc.exists) {
-                return res.status(403).json({ valid: false, error: 'This device has not been activated' });
+        for (const tier of TIER_ORDER) {
+            const licenseCode = links[tier];
+            if (!licenseCode) continue; // این سطح اصلاً ثبت نشده، برو سطح بعد
+
+            const licenseDoc = await db.collection('licenses').doc(licenseCode).get();
+            if (!licenseDoc.exists) continue; // داده ناسازگار → نادیده بگیر
+
+            const data = licenseDoc.data();
+            let expiresAt = null;
+
+            if (data.is_shared) {
+                const userDoc = await licenseDoc.ref.collection('users').doc(safeId).get();
+                if (!userDoc.exists) continue;
+                expiresAt = userDoc.data().expires_at ? userDoc.data().expires_at.toMillis() : null;
+            } else {
+                if (!data.is_used || data.fingerprint !== fingerprint) continue;
+                expiresAt = data.expires_at ? data.expires_at.toMillis() : null;
             }
 
-            const userData = userDoc.data();
-            const expiresAt = userData.expires_at ? userData.expires_at.toMillis() : null;
-
-            if (expiresAt !== null && Date.now() > expiresAt) {
-                return res.status(403).json({ valid: false, error: 'مدت اعتبار لایسنس به پایان رسیده است' });
+            // ── این سطح "پیدا شد" → دیگه به سطح‌های پایین‌تر نمیریم ─────
+            if (tier !== 'lifetime' && expiresAt !== null && Date.now() > expiresAt) {
+                return res.status(200).json({
+                    status: 'purchase_required',
+                    licenseType: tier,
+                    licenseCode
+                });
             }
 
-            return res.status(200).json({ valid: true, licenseType, expiresAt });
+            const token = createSignedToken(fingerprint, licenseCode, tier, expiresAt);
+            return res.status(200).json({
+                status: 'valid',
+                token,
+                licenseType: tier,
+                licenseCode,
+                expiresAt
+            });
         }
 
-        // لایسنس اختصاصی — چک fingerprint و انقضا
-        if (!data.is_used || data.fingerprint !== fingerprint) {
-            return res.status(403).json({ valid: false, error: 'This license is not valid for this device' });
-        }
-
-        const expiresAt = data.expires_at ? data.expires_at.toMillis() : null;
-
-        if (expiresAt !== null && Date.now() > expiresAt) {
-            return res.status(403).json({ valid: false, error: 'مدت اعتبار لایسنس به پایان رسیده است' });
-        }
-
-        return res.status(200).json({ valid: true, licenseType, expiresAt });
+        return res.status(200).json({ status: 'signup_required' });
 
     } catch (err) {
-        console.error('خطا در تأیید لایسنس:', err);
-        return res.status(500).json({ valid: false, error: 'Server error' });
+        console.error('خطا در signin:', err);
+        return res.status(500).json({ status: 'error', error: 'Server error' });
     }
 });
 
