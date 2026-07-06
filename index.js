@@ -29,17 +29,34 @@ const LICENSE_DURATIONS = {
 // ترتیب اولویت چک در زمان ساین‌این: مادام‌العمر > سالانه > ماهانه > رایگان
 const TIER_ORDER = ["lifetime", "1year", "1month", "5days"];
 
+// ── appId های مجاز ────────────────────────────────────────────────────────
+// لیست application id های سه اپ. اگه appId ارسالی توی این لیست نباشه
+// درخواست رد میشه (جلوی سوءاستفاده با appId جعلی رو هم می‌گیره).
+const ALLOWED_APP_IDS = [
+  "com.BuskitApp",
+  "com.BuskitApp.pro", // ← application id واقعی اپ دوم رو اینجا بذار
+  "com.BuskitApp.lite", // ← application id واقعی اپ سوم رو اینجا بذار
+];
+
 // ── fingerprint رو برای Firestore document ID ایمن کن ────────────────────
 function toSafeId(fingerprint) {
   return fingerprint.replace(/\//g, "_").replace(/\+/g, "-").replace(/=/g, "");
 }
 
+// ── شناسه‌ی ترکیبی «دستگاه + اپ» ──────────────────────────────────────────
+// همه جایی که قبلاً فقط از fingerprint به‌عنوان کلید استفاده می‌شد، حالا از
+// این ترکیب استفاده می‌کنیم تا سه اپ روی یک گوشی کاملاً از هم جدا بمونن.
+function deviceAppId(fingerprint, appId) {
+  return `${toSafeId(fingerprint)}__${appId}`;
+}
+
 // ── ساخت token امضاشده (RSA-SHA256) ──────────────────────────────────────
-// این امضا تنها چیزیه که جلوی جعل/دستکاری توکن توسط کلاینت رو می‌گیره،
-// چون کلید خصوصی فقط روی سرور وجود داره.
-function createSignedToken(fingerprint, licenseCode, licenseType, expiresAt) {
+// appId هم داخل payload امضا میشه، پس کلاینت هم می‌تونه (به‌عنوان لایه‌ی دفاع
+// دوم) چک کنه که این توکن واقعاً برای همین اپ صادر شده، نه یک اپ دیگه.
+function createSignedToken(fingerprint, appId, licenseCode, licenseType, expiresAt) {
   const payload = JSON.stringify({
     fingerprint,
+    appId,
     licenseCode,
     licenseType,
     expiresAt: expiresAt ?? null,
@@ -51,17 +68,18 @@ function createSignedToken(fingerprint, licenseCode, licenseType, expiresAt) {
   return Buffer.from(payload).toString("base64") + "|" + signature;
 }
 
-// ── ثبت/به‌روزرسانی ایندکس devices/{fingerprint} ─────────────────────────
-// این ایندکس باعث میشه /signin بتونه با یک خوندن بفهمه این گوشی
-// توی کدوم سطح(ها)ی لایسنس عضویت داره، بدون اسکن کل کالکشن licenses.
-async function linkDevice(fingerprint, licenseType, licenseCode) {
-  const safeId = toSafeId(fingerprint);
+// ── ثبت/به‌روزرسانی ایندکس devices/{fingerprint__appId} ──────────────────
+// این ایندکس باعث میشه /signin بتونه با یک خوندن بفهمه این ترکیب
+// «گوشی + اپ» توی کدوم سطح(ها)ی لایسنس عضویت داره.
+async function linkDevice(fingerprint, appId, licenseType, licenseCode) {
+  const docId = deviceAppId(fingerprint, appId);
   await db
     .collection("devices")
-    .doc(safeId)
+    .doc(docId)
     .set(
       {
         fingerprint,
+        appId,
         links: {
           [licenseType]: licenseCode,
         },
@@ -71,25 +89,31 @@ async function linkDevice(fingerprint, licenseType, licenseCode) {
     );
 }
 
+function isValidAppId(appId) {
+  return typeof appId === "string" && ALLOWED_APP_IDS.includes(appId);
+}
+
 // ── مسیر فعال‌سازی (ساین‌آپ - وقتی کاربر کد لایسنس رو دستی وارد می‌کنه) ──
 app.post("/activate", async (req, res) => {
   try {
     const {
       licenseCode: rawLicenseCode,
       fingerprint,
+      appId,
       hardwareSignature,
     } = req.body;
 
-    if (!rawLicenseCode || !fingerprint) {
+    if (!rawLicenseCode || !fingerprint || !appId) {
       return res
         .status(400)
-        .json({ error: "License code and fingerprint are required" });
+        .json({ error: "License code, fingerprint and appId are required" });
+    }
+
+    if (!isValidAppId(appId)) {
+      return res.status(400).json({ error: "Unknown appId" });
     }
 
     // ── نرمال‌سازی کد لایسنس به حروف بزرگ ──────────────────────────
-    // کلاینت همیشه قبل از ارسال uppercase می‌کنه؛ این خط هم اینجا تضمین
-    // می‌کنه که حتی اگه یک کد لایسنس با حروف mixed-case تو Firestore
-    // ساخته شده باشه، lookup همچنان درست انجام بشه.
     const licenseCode = rawLicenseCode.trim().toUpperCase();
 
     const licenseRef = db.collection("licenses").doc(licenseCode);
@@ -108,12 +132,13 @@ app.post("/activate", async (req, res) => {
     }
 
     const durationMs = LICENSE_DURATIONS[licenseType];
-    const safeId = toSafeId(fingerprint);
+    const safeId = deviceAppId(fingerprint, appId);
 
     // ════════════════════════════════════════════════════════════════
     // حالت ۱: لایسنس مشترک (is_shared = true) — مثل کد رایگان ۵ روزه
     // ════════════════════════════════════════════════════════════════
     if (isShared) {
+      // subcollection users حالا بر اساس «دستگاه + اپ» ایندکس میشه، نه فقط دستگاه
       const userRef = licenseRef.collection("users").doc(safeId);
       const userDoc = await userRef.get();
 
@@ -123,15 +148,15 @@ app.post("/activate", async (req, res) => {
           ? userData.expires_at.toMillis()
           : null;
 
-        // هنوز در بازه → نصب مجدد مجازه، یک توکن تازه با همون expiresAt قبلی صادر میشه
         if (expiresAt === null || Date.now() <= expiresAt) {
           const token = createSignedToken(
             fingerprint,
+            appId,
             licenseCode,
             licenseType,
             expiresAt,
           );
-          await linkDevice(fingerprint, licenseType, licenseCode);
+          await linkDevice(fingerprint, appId, licenseType, licenseCode);
           return res
             .status(200)
             .json({
@@ -143,17 +168,13 @@ app.post("/activate", async (req, res) => {
             });
         }
 
-        // بازه تموم شده → رد کن (آنینستال/نصب مجدد نباید ۵ روز تازه بده)
         return res.status(403).json({
           error:
             "You have already used your free trial. Please purchase a license to continue.",
         });
       }
 
-      // اولین بار این fingerprint میاد سراغ trial → ثبت کن
-      // hardwareSignature هم ذخیره میشه فقط برای بررسی دستی آینده
-      // (مثلاً اگه یک روز الگوی مشکوک از تعداد ترایال‌های یک مدل خاص دیده شد)
-      // — فعلاً هیچ بلاکی بر اساسش انجام نمیشه.
+      // اولین بار این ترکیب «دستگاه + اپ» میاد سراغ trial → ثبت کن
       const now = Date.now();
       const expiresAt = durationMs !== null ? now + durationMs : null;
       const expiresAtFirestore =
@@ -163,6 +184,7 @@ app.post("/activate", async (req, res) => {
 
       await userRef.set({
         fingerprint,
+        appId,
         hardwareSignature: hardwareSignature || null,
         activated_at: admin.firestore.FieldValue.serverTimestamp(),
         expires_at: expiresAtFirestore,
@@ -174,11 +196,12 @@ app.post("/activate", async (req, res) => {
 
       const token = createSignedToken(
         fingerprint,
+        appId,
         licenseCode,
         licenseType,
         expiresAt,
       );
-      await linkDevice(fingerprint, licenseType, licenseCode);
+      await linkDevice(fingerprint, appId, licenseType, licenseCode);
       return res
         .status(200)
         .json({ success: true, token, licenseType, licenseCode, expiresAt });
@@ -188,7 +211,8 @@ app.post("/activate", async (req, res) => {
     // حالت ۲: لایسنس اختصاصی (is_shared = false)
     // ════════════════════════════════════════════════════════════════
     if (data.is_used) {
-      if (data.fingerprint === fingerprint) {
+      // حالا هم fingerprint هم appId باید مچ باشن
+      if (data.fingerprint === fingerprint && data.appId === appId) {
         const expiresAt = data.expires_at ? data.expires_at.toMillis() : null;
 
         if (expiresAt !== null && Date.now() > expiresAt) {
@@ -197,11 +221,12 @@ app.post("/activate", async (req, res) => {
 
         const token = createSignedToken(
           fingerprint,
+          appId,
           licenseCode,
           licenseType,
           expiresAt,
         );
-        await linkDevice(fingerprint, licenseType, licenseCode);
+        await linkDevice(fingerprint, appId, licenseType, licenseCode);
         return res
           .status(200)
           .json({ success: true, token, licenseType, licenseCode, expiresAt });
@@ -223,6 +248,7 @@ app.post("/activate", async (req, res) => {
     await licenseRef.update({
       is_used: true,
       fingerprint,
+      appId,
       license_type: licenseType,
       activated_at: admin.firestore.FieldValue.serverTimestamp(),
       expires_at: expiresAtFirestore,
@@ -230,11 +256,12 @@ app.post("/activate", async (req, res) => {
 
     const token = createSignedToken(
       fingerprint,
+      appId,
       licenseCode,
       licenseType,
       expiresAt,
     );
-    await linkDevice(fingerprint, licenseType, licenseCode);
+    await linkDevice(fingerprint, appId, licenseType, licenseCode);
     return res
       .status(200)
       .json({ success: true, token, licenseType, licenseCode, expiresAt });
@@ -244,20 +271,23 @@ app.post("/activate", async (req, res) => {
   }
 });
 
-// ── مسیر ساین‌این (هر بار اجرای اپ — فقط fingerprint می‌فرسته) ───────────
+// ── مسیر ساین‌این (هر بار اجرای اپ — fingerprint + appId می‌فرسته) ───────
 // ترتیب چک: lifetime → 1year → 1month → 5days
-// به محض پیدا شدن یک سطح (حتی اگه منقضی باشه)، به سطح‌های پایین‌تر نمیریم.
 app.post("/signin", async (req, res) => {
   try {
-    const { fingerprint } = req.body;
+    const { fingerprint, appId } = req.body;
 
-    if (!fingerprint) {
+    if (!fingerprint || !appId) {
       return res
         .status(400)
-        .json({ status: "error", error: "Fingerprint is required" });
+        .json({ status: "error", error: "Fingerprint and appId are required" });
     }
 
-    const safeId = toSafeId(fingerprint);
+    if (!isValidAppId(appId)) {
+      return res.status(400).json({ status: "error", error: "Unknown appId" });
+    }
+
+    const safeId = deviceAppId(fingerprint, appId);
     const deviceDoc = await db.collection("devices").doc(safeId).get();
 
     if (!deviceDoc.exists) {
@@ -268,10 +298,10 @@ app.post("/signin", async (req, res) => {
 
     for (const tier of TIER_ORDER) {
       const licenseCode = links[tier];
-      if (!licenseCode) continue; // این سطح اصلاً ثبت نشده، برو سطح بعد
+      if (!licenseCode) continue;
 
       const licenseDoc = await db.collection("licenses").doc(licenseCode).get();
-      if (!licenseDoc.exists) continue; // داده ناسازگار → نادیده بگیر
+      if (!licenseDoc.exists) continue;
 
       const data = licenseDoc.data();
       let expiresAt = null;
@@ -286,11 +316,12 @@ app.post("/signin", async (req, res) => {
           ? userDoc.data().expires_at.toMillis()
           : null;
       } else {
-        if (!data.is_used || data.fingerprint !== fingerprint) continue;
+        // هم fingerprint هم appId باید مطابقت داشته باشن
+        if (!data.is_used || data.fingerprint !== fingerprint || data.appId !== appId)
+          continue;
         expiresAt = data.expires_at ? data.expires_at.toMillis() : null;
       }
 
-      // ── این سطح "پیدا شد" → دیگه به سطح‌های پایین‌تر نمیریم ─────
       if (tier !== "lifetime" && expiresAt !== null && Date.now() > expiresAt) {
         return res.status(200).json({
           status: "purchase_required",
@@ -301,6 +332,7 @@ app.post("/signin", async (req, res) => {
 
       const token = createSignedToken(
         fingerprint,
+        appId,
         licenseCode,
         tier,
         expiresAt,
