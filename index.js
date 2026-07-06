@@ -33,9 +33,9 @@ const TIER_ORDER = ["lifetime", "1year", "1month", "5days"];
 // لیست application id های سه اپ. اگه appId ارسالی توی این لیست نباشه
 // درخواست رد میشه (جلوی سوءاستفاده با appId جعلی رو هم می‌گیره).
 const ALLOWED_APP_IDS = [
-  "com.BuskitApp",
-  "com.BuskitApp.pro", // ← application id واقعی اپ دوم رو اینجا بذار
-  "com.BuskitApp.lite", // ← application id واقعی اپ سوم رو اینجا بذار
+  "com.BuskitApp.LiveFX",
+  "com.BuskitApp.LiveMT", // ← application id واقعی اپ دوم رو اینجا بذار
+  "com.BuskitApp.LiveMT.pro", // ← application id واقعی اپ سوم رو اینجا بذار
 ];
 
 // ── fingerprint رو برای Firestore document ID ایمن کن ────────────────────
@@ -53,7 +53,13 @@ function deviceAppId(fingerprint, appId) {
 // ── ساخت token امضاشده (RSA-SHA256) ──────────────────────────────────────
 // appId هم داخل payload امضا میشه، پس کلاینت هم می‌تونه (به‌عنوان لایه‌ی دفاع
 // دوم) چک کنه که این توکن واقعاً برای همین اپ صادر شده، نه یک اپ دیگه.
-function createSignedToken(fingerprint, appId, licenseCode, licenseType, expiresAt) {
+function createSignedToken(
+  fingerprint,
+  appId,
+  licenseCode,
+  licenseType,
+  expiresAt,
+) {
   const payload = JSON.stringify({
     fingerprint,
     appId,
@@ -157,15 +163,13 @@ app.post("/activate", async (req, res) => {
             expiresAt,
           );
           await linkDevice(fingerprint, appId, licenseType, licenseCode);
-          return res
-            .status(200)
-            .json({
-              success: true,
-              token,
-              licenseType,
-              licenseCode,
-              expiresAt,
-            });
+          return res.status(200).json({
+            success: true,
+            token,
+            licenseType,
+            licenseCode,
+            expiresAt,
+          });
         }
 
         return res.status(403).json({
@@ -317,7 +321,11 @@ app.post("/signin", async (req, res) => {
           : null;
       } else {
         // هم fingerprint هم appId باید مطابقت داشته باشن
-        if (!data.is_used || data.fingerprint !== fingerprint || data.appId !== appId)
+        if (
+          !data.is_used ||
+          data.fingerprint !== fingerprint ||
+          data.appId !== appId
+        )
           continue;
         expiresAt = data.expires_at ? data.expires_at.toMillis() : null;
       }
