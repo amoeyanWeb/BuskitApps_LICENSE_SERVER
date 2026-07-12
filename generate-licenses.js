@@ -1,14 +1,23 @@
 /**
  * generate-licenses.js
  * ─────────────────────────────────────────────────────────────
- * ساخت و آپلود ۱۵۰۰ لایسنس در Firestore
+ * ساخت و آپلود لایسنس‌ها در Firestore
+ *
+ * هر لایسنس دو محور مستقل داره:
+ *   - license_type : مدت زمان  → "1month" | "1year" | "lifetime" | "5days"
+ *                     (این دقیقاً همون کلیدهاییه که index.js/LICENSE_DURATIONS
+ *                      می‌شناسه — اگه این مقدار هرچیز دیگه‌ای باشه، سرور
+ *                      فعال‌سازی رو با خطای "Invalid license type" رد می‌کنه)
+ *   - tier          : سطح امکانات → "gold" | "silver" | "bronze"
+ *                     (این فیلده که به توکن امضاشده اضافه میشه و اپ روش
+ *                      FeatureGate رو اجرا می‌کنه)
  *
  * اجرا:
  *   npm install firebase-admin
  *   node generate-licenses.js
  *
  * پیش‌نیاز:
- *   فایل serviceAccountKey.json رو کنار این فایل بذار
+ *   فایل serviceAccount.json رو کنار این فایل بذار
  *   (از Firebase Console → Project Settings → Service Accounts دانلود کن)
  * ─────────────────────────────────────────────────────────────
  */
@@ -25,26 +34,47 @@ const db = admin.firestore();
 // ── تنظیمات ──────────────────────────────────────────────────
 const BATCH_SIZE = 490; // Firestore هر batch حداکثر 500 عملیات
 
+// هر ترکیب (tier × duration) یک plan جداست.
+// count رو هرجا خواستید عوض کنید — الان هرکدوم 20 تاست (جمعاً 9×20 = 180 لایسنس).
 const PLANS = [
-  {
-    type: "1year",
-    prefix: "OneY",
-    count: 500,
-    format: "OneY-XXXX-XXXX-XXXX", // فقط نمایشی
-  },
-  {
-    type: "1month",
-    prefix: "OneM",
-    count: 500,
-    format: "OneM-XXXX-XXXX-XXXX",
-  },
-  {
-    type: "lifetime",
-    prefix: "Ever",
-    count: 500,
-    format: "Ever-XXXX-XXXX-XXXX",
-  },
+  { tier: "gold",   duration: "1month",   prefix: "GL1M", count: 20 },
+  { tier: "gold",   duration: "1year",    prefix: "GL1Y", count: 20 },
+  { tier: "gold",   duration: "lifetime", prefix: "GLLT", count: 20 },
+
+  { tier: "silver", duration: "1month",   prefix: "SV1M", count: 20 },
+  { tier: "silver", duration: "1year",    prefix: "SV1Y", count: 20 },
+  { tier: "silver", duration: "lifetime", prefix: "SVLT", count: 20 },
+
+  { tier: "bronze", duration: "1month",   prefix: "BZ1M", count: 20 },
+  { tier: "bronze", duration: "1year",    prefix: "BZ1Y", count: 20 },
+  { tier: "bronze", duration: "lifetime", prefix: "BZLT", count: 20 },
 ];
+
+// ── لایسنس تریال ۵روزه‌ی رایگان (مشترک بین همه‌ی نصب‌ها) ────────────────
+// برخلاف بقیه‌ی پلن‌ها، این is_shared:true هست و count نداره — فقط یک سند
+// با کد ثابت ساخته می‌شه. همه‌ی کاربرا (هرکسی که اپ رو تازه نصب می‌کنه) با
+// همین یک کد فعال می‌شن؛ سرور خودش هر device+appId رو جدا توی
+// licenses/{TRIAL_CODE}/users/{fingerprint__appId} ثبت و ۵روزه محدود می‌کنه.
+const TRIAL_CODE = "FREETRIAL5"; // اگه می‌خواید اسم/کد دیگه‌ای باشه همینجا عوض کنید
+const TRIAL_TIER = "gold";       // طبق قرارمون: تریال همیشه با امکانات طلایی اجرا می‌شه
+
+async function ensureTrialLicense() {
+  console.log(`\n▶ بررسی/ساخت لایسنس تریال مشترک «${TRIAL_CODE}» (5days, ${TRIAL_TIER}) ...`);
+  const ref = db.collection("licenses").doc(TRIAL_CODE);
+  const existing = await ref.get();
+  if (existing.exists) {
+    console.log("  ↷ از قبل وجود داره، دست نمی‌زنیم (تا رکوردهای users زیرش از بین نره).");
+    return;
+  }
+  await ref.set({
+    license_type: "5days",
+    tier: TRIAL_TIER,
+    is_shared: true,
+    total_activations: 0,
+    created_at: admin.firestore.Timestamp.now(),
+  });
+  console.log("  ✓ ساخته شد.");
+}
 
 // ── ساخت کد تصادفی ───────────────────────────────────────────
 // فرمت:  PREFIX-XXXX-XXXX-XXXX   (X = حرف بزرگ یا عدد)
@@ -63,7 +93,6 @@ function generateCode(prefix) {
 
 // ── آپلود با batch ────────────────────────────────────────────
 async function uploadBatch(docs) {
-  // Firestore batch حداکثر 500 عملیات → تقسیم کن
   for (let i = 0; i < docs.length; i += BATCH_SIZE) {
     const chunk = docs.slice(i, i + BATCH_SIZE);
     const batch = db.batch();
@@ -77,10 +106,18 @@ async function uploadBatch(docs) {
 
 // ── تولید و آپلود همه لایسنس‌ها ──────────────────────────────
 async function main() {
-  const usedCodes = new Set(); // جلوگیری از تکرار
+  await ensureTrialLicense();
+
+  const usedCodes = new Set(); // جلوگیری از تکرار کد
+  const csvRows = ["code,tier,duration"]; // برای بایگانی خروجی
+  csvRows.push(`${TRIAL_CODE},${TRIAL_TIER},5days`);
+
+  let totalCount = 0;
 
   for (const plan of PLANS) {
-    console.log(`\n▶ در حال ساخت ${plan.count} لایسنس ${plan.type} ...`);
+    console.log(
+      `\n▶ در حال ساخت ${plan.count} لایسنس ${plan.tier}/${plan.duration} (${plan.prefix}) ...`,
+    );
 
     const docs = [];
     let attempts = 0;
@@ -98,38 +135,30 @@ async function main() {
       docs.push({
         id: code,
         data: {
-          license_type: plan.type,
+          license_type: plan.duration, // "1month" | "1year" | "lifetime" — باید دقیقاً یکی از کلیدهای LICENSE_DURATIONS در index.js باشه
+          tier: plan.tier,              // "gold" | "silver" | "bronze"
           is_shared: false,
           is_used: false,
           fingerprint: null,
+          appId: null,
           activated_at: null,
           expires_at: null,
           created_at: admin.firestore.Timestamp.now(),
         },
       });
+
+      csvRows.push(`${code},${plan.tier},${plan.duration}`);
     }
 
     await uploadBatch(docs);
-    console.log(`✅ ${plan.count} لایسنس ${plan.type} آپلود شد`);
+    totalCount += docs.length;
+    console.log(`✅ ${docs.length} لایسنس ${plan.tier}/${plan.duration} آپلود شد`);
   }
 
-  console.log("\n🎉 همه ۱۵۰۰ لایسنس با موفقیت در Firestore ذخیره شدند");
+  console.log(`\n🎉 همه‌ی ${totalCount} لایسنس با موفقیت در Firestore ذخیره شدند`);
 
-  // ── ذخیره CSV برای بایگانی ───────────────────────────────
-  const allCodes = [...usedCodes];
-  const csv = [
-    "code,type",
-    ...allCodes.map((c) => {
-      const type = c.startsWith("OneY")
-        ? "1year"
-        : c.startsWith("OneM")
-          ? "1month"
-          : "lifetime";
-      return `${c},${type}`;
-    }),
-  ].join("\n");
-
-  fs.writeFileSync("licenses_export.csv", csv, "utf8");
+  // ── ذخیره CSV برای بایگانی (کد + سطح + مدت، مستقیم از داده‌ی واقعی) ──
+  fs.writeFileSync("licenses_export.csv", csvRows.join("\n"), "utf8");
   console.log("📄 فایل licenses_export.csv هم ذخیره شد (نگه‌دار!)");
 
   process.exit(0);

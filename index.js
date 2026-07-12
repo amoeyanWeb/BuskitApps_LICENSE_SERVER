@@ -27,7 +27,10 @@ const LICENSE_DURATIONS = {
 };
 
 // ترتیب اولویت چک در زمان ساین‌این: مادام‌العمر > سالانه > ماهانه > رایگان
-const TIER_ORDER = ["lifetime", "1year", "1month", "5days"];
+// نکته: این «duration» هست (مدت زمان لایسنس)، نه «tier» (سطح gold/silver/bronze).
+// اسمش رو عمداً از TIER_ORDER به DURATION_ORDER عوض کردیم تا با مفهوم جدید
+// tier (که پایین‌تر اضافه شده) قاطی نشه.
+const DURATION_ORDER = ["lifetime", "1year", "1month", "5days"];
 
 // ── appId های مجاز ────────────────────────────────────────────────────────
 // لیست application id های سه اپ. اگه appId ارسالی توی این لیست نباشه
@@ -53,18 +56,23 @@ function deviceAppId(fingerprint, appId) {
 // ── ساخت token امضاشده (RSA-SHA256) ──────────────────────────────────────
 // appId هم داخل payload امضا میشه، پس کلاینت هم می‌تونه (به‌عنوان لایه‌ی دفاع
 // دوم) چک کنه که این توکن واقعاً برای همین اپ صادر شده، نه یک اپ دیگه.
+// tier (gold/silver/bronze) هم اینجا داخل payload امضا میشه — این همون
+// فیلدیه که اپ روش FeatureGate رو اجرا می‌کنه، پس باید حتماً امضا بشه تا
+// قابل جعل نباشه.
 function createSignedToken(
   fingerprint,
   appId,
   licenseCode,
   licenseType,
   expiresAt,
+  tier,
 ) {
   const payload = JSON.stringify({
     fingerprint,
     appId,
     licenseCode,
     licenseType,
+    tier,
     expiresAt: expiresAt ?? null,
     issuedAt: Date.now(),
   });
@@ -72,6 +80,25 @@ function createSignedToken(
   sign.update(payload);
   const signature = sign.sign(privateKey, "base64");
   return Buffer.from(payload).toString("base64") + "|" + signature;
+}
+
+// ── سطح لایسنس (gold/silver/bronze) رو با fail-safe از سند لایسنس بخون ──
+// اگه به هر دلیلی (داده‌ی قدیمی، دستکاری، ...) فیلد tier روی سند نبود یا
+// مقدار ناشناخته داشت، fail-closed میره روی پایین‌ترین سطح (bronze)، نه بالاترین.
+const VALID_TIERS = ["gold", "silver", "bronze"];
+function resolveTier(licenseData) {
+  // ── نرمال‌سازی: حروف بزرگ/کوچیک و فاصله‌ی اضافه نباید باعث fail-closed
+  // بی‌صدا به bronze بشه — این دقیقاً همون چیزی بود که باعث میشد لایسنس
+  // Silver/Gold درست‌ثبت‌شده توی Firestore، توی اپ Bronze نشون داده بشه.
+  const raw = licenseData.tier;
+  const t = typeof raw === "string" ? raw.trim().toLowerCase() : raw;
+  if (!VALID_TIERS.includes(t)) {
+    console.warn(
+      `resolveTier: unrecognized/missing tier value (raw="${raw}") on license, falling back to bronze`,
+    );
+    return "bronze";
+  }
+  return t;
 }
 
 // ── ثبت/به‌روزرسانی ایندکس devices/{fingerprint__appId} ──────────────────
@@ -131,6 +158,7 @@ app.post("/activate", async (req, res) => {
 
     const data = licenseDoc.data();
     const licenseType = data.license_type ?? "lifetime";
+    const tier = resolveTier(data);
     const isShared = data.is_shared === true;
 
     if (!LICENSE_DURATIONS.hasOwnProperty(licenseType)) {
@@ -161,12 +189,14 @@ app.post("/activate", async (req, res) => {
             licenseCode,
             licenseType,
             expiresAt,
+            tier,
           );
           await linkDevice(fingerprint, appId, licenseType, licenseCode);
           return res.status(200).json({
             success: true,
             token,
             licenseType,
+            tier,
             licenseCode,
             expiresAt,
           });
@@ -204,11 +234,12 @@ app.post("/activate", async (req, res) => {
         licenseCode,
         licenseType,
         expiresAt,
+        tier,
       );
       await linkDevice(fingerprint, appId, licenseType, licenseCode);
       return res
         .status(200)
-        .json({ success: true, token, licenseType, licenseCode, expiresAt });
+        .json({ success: true, token, licenseType, tier, licenseCode, expiresAt });
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -229,11 +260,12 @@ app.post("/activate", async (req, res) => {
           licenseCode,
           licenseType,
           expiresAt,
+          tier,
         );
         await linkDevice(fingerprint, appId, licenseType, licenseCode);
         return res
           .status(200)
-          .json({ success: true, token, licenseType, licenseCode, expiresAt });
+          .json({ success: true, token, licenseType, tier, licenseCode, expiresAt });
       }
 
       return res.status(403).json({
@@ -264,11 +296,12 @@ app.post("/activate", async (req, res) => {
       licenseCode,
       licenseType,
       expiresAt,
+      tier,
     );
     await linkDevice(fingerprint, appId, licenseType, licenseCode);
     return res
       .status(200)
-      .json({ success: true, token, licenseType, licenseCode, expiresAt });
+      .json({ success: true, token, licenseType, tier, licenseCode, expiresAt });
   } catch (err) {
     console.error("خطا در فعال‌سازی:", err);
     return res.status(500).json({ error: "Server error" });
@@ -300,14 +333,15 @@ app.post("/signin", async (req, res) => {
 
     const links = deviceDoc.data().links || {};
 
-    for (const tier of TIER_ORDER) {
-      const licenseCode = links[tier];
+    for (const durationType of DURATION_ORDER) {
+      const licenseCode = links[durationType];
       if (!licenseCode) continue;
 
       const licenseDoc = await db.collection("licenses").doc(licenseCode).get();
       if (!licenseDoc.exists) continue;
 
       const data = licenseDoc.data();
+      const tier = resolveTier(data);
       let expiresAt = null;
 
       if (data.is_shared) {
@@ -330,10 +364,15 @@ app.post("/signin", async (req, res) => {
         expiresAt = data.expires_at ? data.expires_at.toMillis() : null;
       }
 
-      if (tier !== "lifetime" && expiresAt !== null && Date.now() > expiresAt) {
+      if (
+        durationType !== "lifetime" &&
+        expiresAt !== null &&
+        Date.now() > expiresAt
+      ) {
         return res.status(200).json({
           status: "purchase_required",
-          licenseType: tier,
+          licenseType: durationType,
+          tier,
           licenseCode,
         });
       }
@@ -342,13 +381,15 @@ app.post("/signin", async (req, res) => {
         fingerprint,
         appId,
         licenseCode,
-        tier,
+        durationType,
         expiresAt,
+        tier,
       );
       return res.status(200).json({
         status: "valid",
         token,
-        licenseType: tier,
+        licenseType: durationType,
+        tier,
         licenseCode,
         expiresAt,
       });
