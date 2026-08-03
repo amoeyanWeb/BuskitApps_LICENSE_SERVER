@@ -171,10 +171,9 @@ app.get("/check-discount/:code", async (req, res) => {
     if (!snap.exists) {
       return res.status(404).json({ valid: false, error: "not-found" });
     }
+    // کد تخفیف صرفاً باید وجود داشته باشد؛ می‌تواند به دفعات نامحدود
+    // استفاده شود (هر بار فقط برای آمار/پورسانتِ نماینده ثبت می‌گردد)
     const data = snap.data();
-    if (data.used) {
-      return res.status(200).json({ valid: false, error: "used" });
-    }
     return res.status(200).json({
       valid: true,
       percent: Number(data.percent) || 0,
@@ -189,8 +188,10 @@ app.get("/check-discount/:code", async (req, res) => {
 // ── ثبت نهایی سفارش: وقتی کاربر در فرم خرید سایت محصولات را انتخاب کرد و
 //    روی «ثبت سفارش» زد صدا زده می‌شود — چه کد تخفیف داشته باشد چه نه.
 //    با یک تراکنش Firestore:
-//      ۱) اگر discountCode ارسال شده بود، آن را (اگر هنوز استفاده نشده) used
-//         می‌کند؛ اگر ارسال نشده بود این مرحله رد می‌شود.
+//      ۱) اگر discountCode ارسال شده و در دیتابیس وجود داشت، صرفاً آمار
+//         فروشِ آن کد (salesCount) را یکی زیاد می‌کند و این خرید را به
+//         purchases اضافه می‌کند — کد هرگز «مصرف‌شده/used» نمی‌شود و قابل
+//         استفاده‌ی مجدد توسط خریداران بعدی همان نماینده است.
 //      ۲) به ازای هر محصولِ نرم‌افزاریِ انتخاب‌شده، یک سند واقعی و کاربردی
 //         در همون کالکشن licenses می‌سازد (is_used:false) — دقیقاً همون
 //         سندی که بعداً با /activate کامل می‌شود (fingerprint/expires_at/...)
@@ -235,17 +236,22 @@ app.post("/create-order", async (req, res) => {
     );
 
     const reservedCount = await db.runTransaction(async (tx) => {
-      // اگر کد تخفیفی در کار بود، همین ابتدا (قبل از هر نوشتنی) چکش می‌کنیم
+      // اگر کد تخفیفی در کار بود، فقط وجودش را چک می‌کنیم — کد تخفیف
+      // یک‌بارمصرف نیست و هر نماینده/فروشنده می‌تواند بارها آن را برای
+      // خریداران مختلف به کار ببرد. این‌جا صرفاً آمار فروشِ آن کد
+      // (تعداد دفعات استفاده، برای محاسبه‌ی پورسانت) را افزایش می‌دهیم.
       if (codeRef) {
         const codeSnap = await tx.get(codeRef);
         if (!codeSnap.exists) throw new Error("not-found");
-        if (codeSnap.data().used) throw new Error("used");
 
         tx.update(codeRef, {
-          used: true,
-          usedAt: admin.firestore.FieldValue.serverTimestamp(),
-          usedBy: { name, email },
-          orderId: orderRef.id,
+          salesCount: admin.firestore.FieldValue.increment(1),
+          purchases: admin.firestore.FieldValue.arrayUnion({
+            name,
+            email,
+            orderId: orderRef.id,
+            usedAt: new Date(),
+          }),
         });
       }
 
