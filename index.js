@@ -148,6 +148,15 @@ const PRODUCT_LICENSE_MAP = {
   p2: { tier: "gold", license_type: "lifetime" },
 };
 
+// ── کد سیستمیِ «بدون کد تخفیف» ────────────────────────────────────────────
+// هر سفارشی که هیچ کد تخفیفِ واقعی روش اعمال نشده (یا مشتری اصلاً کدی وارد
+// نکرده، یا برای همین آیتم مشخص discountApplied نداشته) به‌جای این‌که هیچ
+// جا ثبت نشه، زیر همین کد جمع می‌شه؛ این‌طوری از همون تب «کدهای تخفیف»ِ پنل
+// ادمین می‌تونی آمار فروشِ مستقیم/بدون‌نماینده رو هم کنار آمار هر نماینده
+// ببینی، بدون این‌که مشتری مجبور باشه چیزی تایپ کنه. این کد صفر درصد/صفر
+// مبلغ تخفیف داره — پس هیچ تاثیری روی قیمت نمی‌ذاره، فقط برای آماره.
+const NO_DISCOUNT_CODE = "NODISCOUNT";
+
 // ── تولید یک کد لایسنس تصادفی و خوانا (بدون حروف/ارقام شبیه‌به‌هم مثل O/0, I/1) ──
 const LICENSE_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 function generateLicenseCode() {
@@ -165,6 +174,11 @@ app.get("/check-discount/:code", async (req, res) => {
     const code = (req.params.code || "").trim().toUpperCase();
     if (!code) {
       return res.status(400).json({ valid: false, error: "no-code" });
+    }
+    // این کد یک بازه‌ی داخلی/سیستمی برای آمارِ فروش مستقیم است، نه یک کدِ
+    // تخفیفِ واقعی که قرار باشد مشتری‌ها دستی واردش کنند
+    if (code === NO_DISCOUNT_CODE) {
+      return res.status(404).json({ valid: false, error: "not-found" });
     }
 
     const snap = await db.collection("discountCodes").doc(code).get();
@@ -188,10 +202,13 @@ app.get("/check-discount/:code", async (req, res) => {
 // ── ثبت نهایی سفارش: وقتی کاربر در فرم خرید سایت محصولات را انتخاب کرد و
 //    روی «ثبت سفارش» زد صدا زده می‌شود — چه کد تخفیف داشته باشد چه نه.
 //    با یک تراکنش Firestore:
-//      ۱) اگر discountCode ارسال شده و در دیتابیس وجود داشت، صرفاً آمار
-//         فروشِ آن کد (salesCount) را یکی زیاد می‌کند و این خرید را به
-//         purchases اضافه می‌کند — کد هرگز «مصرف‌شده/used» نمی‌شود و قابل
-//         استفاده‌ی مجدد توسط خریداران بعدی همان نماینده است.
+//      ۱) هر آیتمِ سفارش می‌تواند جداگانه discountApplied:true/false داشته
+//         باشد (یعنی «این محصول با کد تخفیف حساب شود یا نه»). فقط به تعدادِ
+//         آیتم‌هایی که واقعاً discountApplied:true دارند، آمار فروشِ کدِ
+//         واقعی (salesCount) در discountCodes بالا می‌رود. بقیه‌ی آیتم‌ها
+//         (چه کدی وارد نشده باشد، چه discountApplied آن‌ها false باشد) به‌جای
+//         این‌که هیچ‌جا ثبت نشوند، زیر کد سیستمیِ NO_DISCOUNT_CODE جمع
+//         می‌شوند تا آمار فروش مستقیم/بدون‌نماینده هم قابل پیگیری باشد.
 //      ۲) به ازای هر محصولِ نرم‌افزاریِ انتخاب‌شده، یک سند واقعی و کاربردی
 //         در همون کالکشن licenses می‌سازد (is_used:false) — دقیقاً همون
 //         سندی که بعداً با /activate کامل می‌شود (fingerprint/expires_at/...)
@@ -215,47 +232,98 @@ app.post("/create-order", async (req, res) => {
         .json({ success: false, error: "هیچ محصولی انتخاب نشده" });
     }
 
-    const code = rawCode ? rawCode.trim().toUpperCase() : null;
+    let code = rawCode ? rawCode.trim().toUpperCase() : null;
+    // کدِ سیستمیِ فروشِ مستقیم را از ورودیِ عمومی نادیده می‌گیریم — این کد
+    // فقط داخلی است و پایین‌تر خودِ سرور به‌صورت خودکار مدیریتش می‌کند
+    if (code === NO_DISCOUNT_CODE) code = null;
 
-    // فقط آیتم‌های نرم‌افزاریِ لایسنس‌دار را از روی نگاشت امن سمت سرور جدا می‌کنیم
-    const licenseInfos = items
-      .map((it) => PRODUCT_LICENSE_MAP[it && it.productKey])
+    // فقط آیتم‌های نرم‌افزاریِ لایسنس‌دار را از روی نگاشت امن سمت سرور جدا
+    // می‌کنیم؛ برای هر کدام، کنارِ اطلاعات لایسنس، پرچمِ discountApplied
+    // همان آیتم را هم نگه می‌داریم (فقط وقتی کد ارسال شده معتبر باشد معنا دارد)
+    const licenseItems = items
+      .map((it) => {
+        const info = PRODUCT_LICENSE_MAP[it && it.productKey];
+        if (!info) return null;
+        return { info, discountApplied: !!(code && it && it.discountApplied) };
+      })
       .filter(Boolean);
 
-    if (licenseInfos.length === 0) {
+    if (licenseItems.length === 0) {
       return res.status(400).json({
         success: false,
         error: "هیچ محصول لایسنس‌داری در سفارش انتخاب نشده",
       });
     }
 
-    const codeRef = code ? db.collection("discountCodes").doc(code) : null;
+    // آیتم‌هایی که واقعاً قرار است کد تخفیفِ وارد شده رویشان اعمال شود، در
+    // برابر بقیه‌ی آیتم‌ها که (بدون کد یا با discountApplied:false) زیر کد
+    // سیستمیِ «فروش مستقیم» جمع می‌شوند
+    const discountedCount = licenseItems.filter((it) => it.discountApplied).length;
+    const directCount = licenseItems.length - discountedCount;
+
+    const codeRef =
+      code && discountedCount > 0 ? db.collection("discountCodes").doc(code) : null;
+    const directRef =
+      directCount > 0 ? db.collection("discountCodes").doc(NO_DISCOUNT_CODE) : null;
     const orderRef = db.collection("orders").doc();
-    const licenseRefs = licenseInfos.map(() =>
+    const licenseRefs = licenseItems.map(() =>
       db.collection("licenses").doc(generateLicenseCode()),
     );
 
     const reservedCount = await db.runTransaction(async (tx) => {
-      // اگر کد تخفیفی در کار بود، فقط وجودش را چک می‌کنیم — کد تخفیف
-      // یک‌بارمصرف نیست و هر نماینده/فروشنده می‌تواند بارها آن را برای
-      // خریداران مختلف به کار ببرد. این‌جا صرفاً آمار فروشِ آن کد
-      // (تعداد دفعات استفاده، برای محاسبه‌ی پورسانت) را افزایش می‌دهیم.
+      // اگر کد تخفیفی واقعاً روی حداقل یک آیتم اعمال شده بود، فقط وجودش را
+      // چک می‌کنیم — کد تخفیف یک‌بارمصرف نیست و هر نماینده/فروشنده می‌تواند
+      // بارها آن را برای خریداران مختلف به کار ببرد. این‌جا صرفاً آمار
+      // فروشِ آن کد (به تعداد آیتم‌های discountApplied، نه کل سفارش) بالا
+      // می‌رود.
       if (codeRef) {
         const codeSnap = await tx.get(codeRef);
         if (!codeSnap.exists) throw new Error("not-found");
 
         tx.update(codeRef, {
-          salesCount: admin.firestore.FieldValue.increment(1),
+          salesCount: admin.firestore.FieldValue.increment(discountedCount),
           purchases: admin.firestore.FieldValue.arrayUnion({
             name,
             email,
             orderId: orderRef.id,
+            itemsCount: discountedCount,
             usedAt: new Date(),
           }),
         });
       }
 
-      licenseInfos.forEach((info, idx) => {
+      // کد سیستمیِ «فروش مستقیم/بدون نماینده» — اگر سندش هنوز وجود نداشته
+      // باشه همین‌جا با ۰٪ تخفیف ساخته می‌شه (پس هیچ اثری روی قیمت نداره)،
+      // فقط برای اینه که همون تب «کدهای تخفیف» پنل ادمین بتونه آمار فروش
+      // مستقیم رو هم کنار آمار نماینده‌ها نشون بده.
+      if (directRef) {
+        const directSnap = await tx.get(directRef);
+        const purchaseEntry = {
+          name,
+          email,
+          orderId: orderRef.id,
+          itemsCount: directCount,
+          usedAt: new Date(),
+        };
+        if (!directSnap.exists) {
+          tx.set(directRef, {
+            percent: 0,
+            amount: 0,
+            repName: "فروش مستقیم (بدون کد تخفیف)",
+            isSystemCode: true,
+            salesCount: directCount,
+            purchases: [purchaseEntry],
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        } else {
+          tx.update(directRef, {
+            salesCount: admin.firestore.FieldValue.increment(directCount),
+            purchases: admin.firestore.FieldValue.arrayUnion(purchaseEntry),
+          });
+        }
+      }
+
+      licenseItems.forEach(({ info, discountApplied }, idx) => {
         tx.set(licenseRefs[idx], {
           tier: info.tier,
           license_type: info.license_type,
@@ -265,8 +333,8 @@ app.post("/create-order", async (req, res) => {
           //    /signin هیچ‌کدوم بهشون کاری ندارن، پس چیزی رو خراب نمی‌کنن ──
           name,
           email,
-          discountCode: code || null,
-          source: code ? "website-discount" : "website-order",
+          discountCode: discountApplied ? code : NO_DISCOUNT_CODE,
+          source: discountApplied ? "website-discount" : "website-direct",
           delivered: false, // شما بعد از فرستادن کد به مشتری این را true می‌کنید (پنل ادمین)
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
         });
@@ -275,7 +343,7 @@ app.post("/create-order", async (req, res) => {
       tx.set(orderRef, {
         name,
         email,
-        discountCode: code || null,
+        discountCode: discountedCount > 0 ? code : null,
         items,
         licenseCodes: licenseRefs.map((r) => r.id),
         status: "awaiting_payment",
