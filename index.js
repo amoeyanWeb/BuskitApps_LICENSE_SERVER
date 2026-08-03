@@ -419,63 +419,93 @@ app.post("/activate", async (req, res) => {
     // ════════════════════════════════════════════════════════════════
     // حالت ۲: لایسنس اختصاصی (is_shared = false)
     // ════════════════════════════════════════════════════════════════
-    if (data.is_used) {
-      // حالا هم fingerprint هم appId باید مچ باشن
-      if (data.fingerprint === fingerprint && data.appId === appId) {
-        const expiresAt = data.expires_at ? data.expires_at.toMillis() : null;
+    // نکته‌ی مهم: چک «آیا قبلاً استفاده شده» و ثبتِ «is_used:true» باید
+    // در یک تراکنش اتمیک (runTransaction) انجام بشه. قبلاً این دو کار
+    // جدا از هم بودن (یک get ساده، بعد یک update جدا) و همین باعث
+    // می‌شد اگه یک کد لایسنس تقریباً هم‌زمان از دو گوشی فعال بشه، هر دو
+    // درخواست licenseDoc را با is_used=false ببینن (چون فاصله‌ی
+    // میلی‌ثانیه‌ای بین خواندن اولی و نوشتنِ آن کافی بود) و هر دو یک
+    // توکن معتبر بگیرند — دقیقاً همون اتفاقی که برات افتاد.
+    // runTransaction این مشکل رو حل می‌کند: اگر دو درخواست هم‌زمان به
+    // همین سند بنویسند، Firestore یکی را با موفقیت انجام می‌دهد و
+    // دیگری را با داده‌ی تازه (is_used=true) دوباره اجرا می‌کند، پس
+    // فقط یکی برنده می‌شود.
+    let txResult;
+    try {
+      txResult = await db.runTransaction(async (tx) => {
+        const freshDoc = await tx.get(licenseRef);
+        if (!freshDoc.exists) {
+          throw Object.assign(new Error("not-found"), { isActivateErr: true });
+        }
+        const freshData = freshDoc.data();
 
-        if (expiresAt !== null && Date.now() > expiresAt) {
-          return res.status(403).json({ error: "Your license has expired" });
+        if (freshData.is_used) {
+          // حالا هم fingerprint هم appId باید مچ باشن
+          if (freshData.fingerprint === fingerprint && freshData.appId === appId) {
+            const expiresAt = freshData.expires_at
+              ? freshData.expires_at.toMillis()
+              : null;
+            if (expiresAt !== null && Date.now() > expiresAt) {
+              throw Object.assign(new Error("expired"), { isActivateErr: true });
+            }
+            return { expiresAt };
+          }
+          throw Object.assign(new Error("already-activated"), {
+            isActivateErr: true,
+          });
         }
 
-        const token = createSignedToken(
+        // اولین فعال‌سازی لایسنس اختصاصی
+        const now = Date.now();
+        const expiresAt = durationMs !== null ? now + durationMs : null;
+        const expiresAtFirestore =
+          expiresAt !== null
+            ? admin.firestore.Timestamp.fromMillis(expiresAt)
+            : null;
+
+        tx.update(licenseRef, {
+          is_used: true,
           fingerprint,
           appId,
-          licenseCode,
-          licenseType,
-          expiresAt,
-          tier,
-        );
-        await linkDevice(fingerprint, appId, licenseType, licenseCode);
-        return res
-          .status(200)
-          .json({ success: true, token, licenseType, tier, licenseCode, expiresAt });
-      }
+          license_type: licenseType,
+          activated_at: admin.firestore.FieldValue.serverTimestamp(),
+          expires_at: expiresAtFirestore,
+        });
 
-      return res.status(403).json({
-        error: "This license code is already activated on another device",
+        return { expiresAt };
       });
+    } catch (err) {
+      if (err.isActivateErr) {
+        if (err.message === "not-found") {
+          return res.status(404).json({ error: "Invalid license code" });
+        }
+        if (err.message === "expired") {
+          return res.status(403).json({ error: "Your license has expired" });
+        }
+        return res.status(403).json({
+          error: "This license code is already activated on another device",
+        });
+      }
+      throw err;
     }
-
-    // اولین فعال‌سازی لایسنس اختصاصی
-    const now = Date.now();
-    const expiresAt = durationMs !== null ? now + durationMs : null;
-    const expiresAtFirestore =
-      expiresAt !== null
-        ? admin.firestore.Timestamp.fromMillis(expiresAt)
-        : null;
-
-    await licenseRef.update({
-      is_used: true,
-      fingerprint,
-      appId,
-      license_type: licenseType,
-      activated_at: admin.firestore.FieldValue.serverTimestamp(),
-      expires_at: expiresAtFirestore,
-    });
 
     const token = createSignedToken(
       fingerprint,
       appId,
       licenseCode,
       licenseType,
-      expiresAt,
+      txResult.expiresAt,
       tier,
     );
     await linkDevice(fingerprint, appId, licenseType, licenseCode);
-    return res
-      .status(200)
-      .json({ success: true, token, licenseType, tier, licenseCode, expiresAt });
+    return res.status(200).json({
+      success: true,
+      token,
+      licenseType,
+      tier,
+      licenseCode,
+      expiresAt: txResult.expiresAt,
+    });
   } catch (err) {
     console.error("خطا در فعال‌سازی:", err);
     return res.status(500).json({ error: "Server error" });
