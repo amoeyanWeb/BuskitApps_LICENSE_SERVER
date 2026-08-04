@@ -674,6 +674,45 @@ app.post("/signin", async (req, res) => {
   }
 });
 
+// ── حذف کد تخفیف (فقط ادمین) ───────────────────────────────────────────────
+// Firestore Security Rules پروژه‌ی livefx-b43d5 اجازه‌ی delete مستقیم از
+// کلاینت رو نمی‌دن (برای همینه که پنل ادمین موقع حذف کد تخفیف خطای «دسترسی
+// کافی نداری» می‌ده)، در حالی که Admin SDK همیشه از این قوانین رد می‌شه.
+// پس حذف رو از همینجا (سرور) با Admin SDK انجام می‌دیم. کلاینت (admin.html)
+// باید idToken کاربریِ که توی پروژه‌ی LiveFX لاگین کرده رو توی هدر
+// Authorization بفرسته تا مطمئن بشیم درخواست از طرف ادمین واقعیه.
+app.delete("/admin/discount/:code", async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization || "";
+    const idToken = authHeader.startsWith("Bearer ")
+      ? authHeader.slice(7)
+      : null;
+
+    if (!idToken) {
+      return res
+        .status(401)
+        .json({ status: "error", error: "توکن ورود ارسال نشده" });
+    }
+
+    // اگه توکن معتبر نباشه (یا لاگین نکرده باشه) اینجا خطا می‌ده و وارد
+    // catch میشیم
+    await admin.auth().verifyIdToken(idToken);
+
+    const { code } = req.params;
+    if (!code) {
+      return res.status(400).json({ status: "error", error: "کد تخفیف نامعتبر" });
+    }
+
+    await db.collection("discountCodes").doc(code).delete();
+    return res.status(200).json({ status: "ok" });
+  } catch (err) {
+    console.error("خطا در حذف کد تخفیف:", err);
+    return res
+      .status(401)
+      .json({ status: "error", error: "دسترسی نامعتبر یا خطای سرور" });
+  }
+});
+
 // ── health check ──────────────────────────────────────────────────────────
 app.get("/", (req, res) => {
   res.json({ status: "LiveFX License Server is running" });
