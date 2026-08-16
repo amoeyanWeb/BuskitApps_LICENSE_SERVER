@@ -37,8 +37,8 @@ const DURATION_ORDER = ["lifetime", "1year", "1month", "5days"];
 // درخواست رد میشه (جلوی سوءاستفاده با appId جعلی رو هم می‌گیره).
 const ALLOWED_APP_IDS = [
   "com.BuskitApp.LiveFX",
-  "com.BuskitApp.LiveMT", // ← application id واقعی اپ دوم رو اینجا بذار
-  "com.BuskitApp.LiveMT.pro", // ← application id واقعی اپ سوم رو اینجا بذار
+  "com.BuskitApp.Tools", // ← application id واقعی اپ دوم رو اینجا بذار
+  "com.BuskitApp.LiveTools", // ← application id واقعی اپ سوم رو اینجا بذار
 ];
 
 // ── fingerprint رو برای Firestore document ID ایمن کن ────────────────────
