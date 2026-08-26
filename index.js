@@ -454,10 +454,11 @@ app.post(
         return res.status(200).json({ ok: true });
       }
 
-      // سفارش تست (test mode) رو در پروداکشن نادیده بگیر
-      if (attrs.test_mode === true && process.env.NODE_ENV === "production") {
-        return res.status(200).json({ ok: true, ignored: "test_mode" });
-      }
+      // ── نکته: چک جداگانه‌ای برای رد کردن سفارش‌های test_mode لازم نیست.
+      // Lemon Squeezy برای Test mode و Live mode، دو وبهوک کاملاً جدا با
+      // secret متفاوت داره؛ همین وبهوک هیچ‌وقت داده‌ی Live دریافت نمی‌کنه
+      // (و برعکس)، پس فیلتر کردن اینجا فقط باعث می‌شه سفارش‌های تستی هم
+      // که عمداً داریم باهاشون سیستم رو تست می‌کنیم، نادیده گرفته بشن.
 
       if (attrs.status !== "paid") {
         return res.status(200).json({ ok: true, ignored: attrs.status });
