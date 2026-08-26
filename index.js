@@ -2,6 +2,14 @@ const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
 
+// ── اجبار به IPv4 برای همه‌ی DNS lookupها ────────────────────────────────
+// شبکه‌ی خروجی Render (پلن رایگان) مسیر IPv6 رو کامل ساپورت نمی‌کنه؛ بدون
+// این خط، Node موقع resolve کردن smtp.gmail.com معمولاً آدرس IPv6 رو
+// انتخاب می‌کنه و اتصال با خطای ENETUNREACH شکست می‌خوره. این تنظیم سراسریه
+// و همه‌ی DNS lookupهای کل اپ (نه فقط Gmail) رو تحت تأثیر قرار می‌ده که
+// برای این پروژه بی‌ضرره.
+require("dns").setDefaultResultOrder("ipv4first");
+
 const admin = require("firebase-admin");
 const crypto = require("crypto");
 
