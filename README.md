@@ -364,3 +364,5 @@ SHA256( androidId + BOARD + BRAND + HARDWARE + MANUFACTURER )
 - token در EncryptedSharedPreferences (AES-256) ذخیره میشه
 - fingerprint هش SHA-256 اطلاعات سخت‌افزاریه — قابل جعل نیست
 
+#   B u s k i t A p p s _ L I C E N S E _ S E R V E R  
+ 
