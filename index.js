@@ -17,9 +17,17 @@ const privateKey = process.env.PRIVATE_KEY.replace(/\\n/g, "\n");
 // نیازی به دامنه یا verify شدن حساب کاربری در یک شرکت ثالث نیست؛ فقط یک
 // اکانت جیمیل معمولی با App Password لازمه. سقف رایگان Gmail SMTP حدود
 // ۵۰۰ ایمیل در روزه که برای این مرحله کافیه.
+//
+// نکته‌ی مهم: به‌جای shorthand «service: gmail» از host/port صریح استفاده
+// می‌کنیم و family:4 رو force می‌کنیم تا فقط IPv4 امتحان بشه — چون شبکه‌ی
+// خروجی Render (پلن رایگان) مسیر IPv6 رو کامل ساپورت نمی‌کنه و باعث خطای
+// ENETUNREACH موقع اتصال به smtp.gmail.com می‌شد.
 const nodemailer = require("nodemailer");
 const mailTransporter = nodemailer.createTransport({
-  service: "gmail",
+  host: "smtp.gmail.com",
+  port: 465,
+  secure: true,
+  family: 4,
   auth: {
     user: process.env.GMAIL_USER,
     pass: process.env.GMAIL_APP_PASSWORD, // App Password، نه پسورد اصلی جیمیل
