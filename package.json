@@ -1,21 +1,19 @@
 {
-  "name": "livefx-license-server",
+  "name": "buskitapps-license-server",
   "version": "1.0.0",
-  "description": "",
+  "description": "Buskit license server: activation, sign-in, and Lemon Squeezy webhook integration.",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
   "dependencies": {
     "cors": "^2.8.6",
-    "dotenv": "^16.6.1",
-    "express": "^5.2.1",
-    "firebase-admin": "^12.7.0",
-    "jsonwebtoken": "^9.0.3",
+    "dotenv": "^17.4.2",
+    "express": "^4.22.2",
+    "firebase-admin": "^14.3.0",
     "sib-api-v3-sdk": "^8.5.0"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
