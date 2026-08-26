@@ -16,6 +16,6 @@
     "express": "^5.2.1",
     "firebase-admin": "^12.7.0",
     "jsonwebtoken": "^9.0.3",
-    "nodemailer": "^9.0.5"
+    "sib-api-v3-sdk": "^8.5.0"
   }
 }
