@@ -113,10 +113,30 @@ function resolveTier(licenseData) {
   return "gold";
 }
 
+// ── appGeneration: شناسه‌ی «نسل» اپ (برای نسخه‌های بعدی/اپ‌های جدید) ──────
+// این فیلد فقط زیرساخته — فعلاً هیچ منطق قفل‌کردن/تشخیص ارتقا روش سوار
+// نیست. هدف این‌ه که از همین الان، هم لایسنس‌ها (بسته به این‌که برای کدوم
+// نسل خریداری شدن) هم دستگاه‌ها (بسته به این‌که کلاینتِ کدوم نسل داره
+// باهاشون حرف می‌زنه) این مقدار رو ذخیره کنن، تا هروقت فیچر تشخیص/ارتقا
+// پیاده‌سازی شد، نیازی به migration داده‌ی قدیمی نباشه.
+const CURRENT_APP_GENERATION = "v1";
+function resolveAppGeneration(licenseData) {
+  return (licenseData && licenseData.appGeneration) || "v1";
+}
+
 // ── ثبت/به‌روزرسانی ایندکس devices/{fingerprint__appId} ──────────────────
 // این ایندکس باعث میشه /signin بتونه با یک خوندن بفهمه این ترکیب
 // «گوشی + اپ» توی کدوم سطح(ها)ی لایسنس عضویت داره.
-async function linkDevice(fingerprint, appId, licenseType, licenseCode) {
+// appGeneration: نسل اپی که همین الان روی این دستگاه نصبه و داره درخواست
+// می‌زنه (نه لزوماً نسل لایسنس) — صرفاً ذخیره می‌شه، فعلاً جایی ازش برای
+// تصمیم‌گیری استفاده نمی‌کنیم.
+async function linkDevice(
+  fingerprint,
+  appId,
+  licenseType,
+  licenseCode,
+  appGeneration,
+) {
   const docId = deviceAppId(fingerprint, appId);
   await db
     .collection("devices")
@@ -125,6 +145,7 @@ async function linkDevice(fingerprint, appId, licenseType, licenseCode) {
       {
         fingerprint,
         appId,
+        appGeneration: appGeneration || CURRENT_APP_GENERATION,
         links: {
           [licenseType]: licenseCode,
         },
@@ -146,7 +167,7 @@ function isValidAppId(appId) {
 // ورودی محدود شده. اگه فرم خرید سایت هنوز فعاله، مطمئن شو فقط همین یک
 // productKey ("p1") رو به سرور می‌فرسته.
 const PRODUCT_LICENSE_MAP = {
-  p1: { tier: "gold", license_type: "lifetime" },
+  p1: { tier: "gold", license_type: "lifetime", appGeneration: "v1" },
 };
 
 // ── نگاشت variant_id لمون‌اسکوییزی → سطح و مدت لایسنس ─────────────────────
@@ -156,7 +177,7 @@ const PRODUCT_LICENSE_MAP = {
 // عمداً سمت سرور نگه داشته می‌شه (نه چیزی که از بدنه‌ی وبهوک خونده بشه)،
 // تا کسی نتونه با جعل payload لایسنس مجانی بگیره.
 const LS_VARIANT_LICENSE_MAP = {
-  2059669: { tier: "gold", license_type: "lifetime" },
+  2059669: { tier: "gold", license_type: "lifetime", appGeneration: "v1" },
 };
 
 // ── کد سیستمیِ «بدون کد تخفیف» ────────────────────────────────────────────
@@ -407,6 +428,7 @@ app.post("/create-order", async (req, res) => {
         tx.set(licenseRefs[idx], {
           tier: info.tier,
           license_type: info.license_type,
+          appGeneration: info.appGeneration || CURRENT_APP_GENERATION,
           is_shared: false,
           is_used: false,
           // ── فیلدهای اضافه، فقط برای پیگیری شما در Firestore. /activate و
@@ -539,6 +561,7 @@ app.post(
         tx.set(db.collection("licenses").doc(licenseCode), {
           tier: info.tier,
           license_type: info.license_type,
+          appGeneration: info.appGeneration || CURRENT_APP_GENERATION,
           is_shared: false,
           is_used: false,
           name,
@@ -593,6 +616,9 @@ app.post("/activate", async (req, res) => {
       fingerprint,
       appId,
       hardwareSignature,
+      // appGeneration اختیاریه — نسخه‌های قدیمی‌تر اپ که هنوز این فیلد رو
+      // نمی‌فرستن هم مشکلی پیش نمیاد، fallback به CURRENT_APP_GENERATION.
+      appGeneration,
     } = req.body;
 
     if (!rawLicenseCode || !fingerprint || !appId) {
@@ -650,7 +676,7 @@ app.post("/activate", async (req, res) => {
             expiresAt,
             tier,
           );
-          await linkDevice(fingerprint, appId, licenseType, licenseCode);
+          await linkDevice(fingerprint, appId, licenseType, licenseCode, appGeneration);
           return res.status(200).json({
             success: true,
             token,
@@ -695,7 +721,7 @@ app.post("/activate", async (req, res) => {
         expiresAt,
         tier,
       );
-      await linkDevice(fingerprint, appId, licenseType, licenseCode);
+      await linkDevice(fingerprint, appId, licenseType, licenseCode, appGeneration);
       return res
         .status(200)
         .json({ success: true, token, licenseType, tier, licenseCode, expiresAt });
@@ -782,7 +808,7 @@ app.post("/activate", async (req, res) => {
       txResult.expiresAt,
       tier,
     );
-    await linkDevice(fingerprint, appId, licenseType, licenseCode);
+    await linkDevice(fingerprint, appId, licenseType, licenseCode, appGeneration);
     return res.status(200).json({
       success: true,
       token,
@@ -801,7 +827,14 @@ app.post("/activate", async (req, res) => {
 // ترتیب چک: lifetime → 5days (تریال)
 app.post("/signin", async (req, res) => {
   try {
-    const { fingerprint, appId } = req.body;
+    const {
+      fingerprint,
+      appId,
+      // اختیاریه (نسخه‌های قدیمی‌تر اپ ممکنه هنوز نفرستنش) — اگه اومد،
+      // پایین‌تر روی سند دستگاه به‌روزش می‌کنیم تا همیشه نشون بده کلاینتِ
+      // کدوم نسل، آخرین‌بار با این fingerprint ساین‌این کرده.
+      appGeneration,
+    } = req.body;
 
     if (!fingerprint || !appId) {
       return res
@@ -814,10 +847,17 @@ app.post("/signin", async (req, res) => {
     }
 
     const safeId = deviceAppId(fingerprint, appId);
-    const deviceDoc = await db.collection("devices").doc(safeId).get();
+    const deviceRef = db.collection("devices").doc(safeId);
+    const deviceDoc = await deviceRef.get();
 
     if (!deviceDoc.exists) {
       return res.status(200).json({ status: "signup_required" });
+    }
+
+    // نسل اپ فعلی رو روی سند دستگاه به‌روز نگه می‌داریم (بی‌ضرر، فقط برای
+    // زیرساخت فیچرهای بعدی — الان هیچ تصمیمی روش گرفته نمی‌شه)
+    if (appGeneration) {
+      deviceRef.set({ appGeneration }, { merge: true }).catch(() => {});
     }
 
     const links = deviceDoc.data().links || {};
