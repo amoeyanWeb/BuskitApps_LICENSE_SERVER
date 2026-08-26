@@ -13,24 +13,47 @@ const db = admin.firestore();
 // ── کلید خصوصی ───────────────────────────────────────────────────────────
 const privateKey = process.env.PRIVATE_KEY.replace(/\\n/g, "\n");
 
+// ── سرویس ایمیل (Gmail SMTP از طریق nodemailer) ──────────────────────────
+// نیازی به دامنه یا verify شدن حساب کاربری در یک شرکت ثالث نیست؛ فقط یک
+// اکانت جیمیل معمولی با App Password لازمه. سقف رایگان Gmail SMTP حدود
+// ۵۰۰ ایمیل در روزه که برای این مرحله کافیه.
+const nodemailer = require("nodemailer");
+const mailTransporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.GMAIL_USER,
+    pass: process.env.GMAIL_APP_PASSWORD, // App Password، نه پسورد اصلی جیمیل
+  },
+});
+
 // ── Express ───────────────────────────────────────────────────────────────
 const app = express();
 app.use(cors());
-app.use(express.json());
+
+// ── body parser ──────────────────────────────────────────────────────────
+// نکته‌ی مهم: مسیر وبهوک Lemon Squeezy باید body رو به‌صورت خام (raw buffer)
+// دریافت کنه، چون امضای HMAC روی همون بایت‌های خامِ ارسالی محاسبه می‌شه، نه
+// روی JSON.stringify شده‌ی دوباره. برای همین این مسیر رو از express.json()
+// عمومی مستثنی می‌کنیم و خودش پایین‌تر express.raw() جداگانه می‌گیره.
+app.use((req, res, next) => {
+  if (req.originalUrl === "/webhooks/lemonsqueezy") {
+    return next();
+  }
+  express.json()(req, res, next);
+});
 
 // ── مدت زمان انواع لایسنس (ms) ───────────────────────────────────────────
+// چون فقط یک محصول (لایسنس مادام‌العمر) می‌فروشی، فقط "lifetime" مونده.
+// "5days" رو نگه داشتیم چون مال کد رایگان Free Trial (is_shared) هست که
+// یک قابلیت جداست، نه یکی از سطح‌های خرید، و توی ActivationActivity هنوز
+// استفاده می‌شه.
 const LICENSE_DURATIONS = {
   lifetime: null,
-  "1year": 365 * 24 * 60 * 60 * 1000,
-  "1month": 30 * 24 * 60 * 60 * 1000,
   "5days": 5 * 24 * 60 * 60 * 1000,
 };
 
-// ترتیب اولویت چک در زمان ساین‌این: مادام‌العمر > سالانه > ماهانه > رایگان
-// نکته: این «duration» هست (مدت زمان لایسنس)، نه «tier» (سطح gold/silver/bronze).
-// اسمش رو عمداً از TIER_ORDER به DURATION_ORDER عوض کردیم تا با مفهوم جدید
-// tier (که پایین‌تر اضافه شده) قاطی نشه.
-const DURATION_ORDER = ["lifetime", "1year", "1month", "5days"];
+// ترتیب اولویت چک در زمان ساین‌این: مادام‌العمر > رایگان (تریال)
+const DURATION_ORDER = ["lifetime", "5days"];
 
 // ── appId های مجاز ────────────────────────────────────────────────────────
 // لیست application id های سه اپ. اگه appId ارسالی توی این لیست نباشه
@@ -56,9 +79,8 @@ function deviceAppId(fingerprint, appId) {
 // ── ساخت token امضاشده (RSA-SHA256) ──────────────────────────────────────
 // appId هم داخل payload امضا میشه، پس کلاینت هم می‌تونه (به‌عنوان لایه‌ی دفاع
 // دوم) چک کنه که این توکن واقعاً برای همین اپ صادر شده، نه یک اپ دیگه.
-// tier (gold/silver/bronze) هم اینجا داخل payload امضا میشه — این همون
-// فیلدیه که اپ روش FeatureGate رو اجرا می‌کنه، پس باید حتماً امضا بشه تا
-// قابل جعل نباشه.
+// tier هم اینجا داخل payload امضا میشه چون FeatureGate سمت اپ هنوز روی
+// همین فیلد کار می‌کنه؛ فعلاً فقط مقدار "gold" صادر می‌شه (تک‌محصولی).
 function createSignedToken(
   fingerprint,
   appId,
@@ -82,23 +104,14 @@ function createSignedToken(
   return Buffer.from(payload).toString("base64") + "|" + signature;
 }
 
-// ── سطح لایسنس (gold/silver/bronze) رو با fail-safe از سند لایسنس بخون ──
-// اگه به هر دلیلی (داده‌ی قدیمی، دستکاری، ...) فیلد tier روی سند نبود یا
-// مقدار ناشناخته داشت، fail-closed میره روی پایین‌ترین سطح (bronze)، نه بالاترین.
-const VALID_TIERS = ["gold", "silver", "bronze"];
+// ── سطح لایسنس رو با fail-safe از سند لایسنس بخون ──────────────────────
+// دیگه فقط یک سطح ("gold") وجود داره چون فقط یک محصول می‌فروشی. اگه به هر
+// دلیلی (داده‌ی قدیمی از قبل که bronze/silver داشت، یا فیلد خالی) مقدار
+// نامعتبر بود، به‌جای این‌که کاربر رو قفل کنیم (fail-closed به یک سطح
+// پایین‌تر که دیگه اصلاً وجود نداره)، همون "gold" برمی‌گردونیم — چون همه‌ی
+// لایسنس‌های معتبر الان یک سطح دارن.
 function resolveTier(licenseData) {
-  // ── نرمال‌سازی: حروف بزرگ/کوچیک و فاصله‌ی اضافه نباید باعث fail-closed
-  // بی‌صدا به bronze بشه — این دقیقاً همون چیزی بود که باعث میشد لایسنس
-  // Silver/Gold درست‌ثبت‌شده توی Firestore، توی اپ Bronze نشون داده بشه.
-  const raw = licenseData.tier;
-  const t = typeof raw === "string" ? raw.trim().toLowerCase() : raw;
-  if (!VALID_TIERS.includes(t)) {
-    console.warn(
-      `resolveTier: unrecognized/missing tier value (raw="${raw}") on license, falling back to bronze`,
-    );
-    return "bronze";
-  }
-  return t;
+  return "gold";
 }
 
 // ── ثبت/به‌روزرسانی ایندکس devices/{fingerprint__appId} ──────────────────
@@ -130,22 +143,21 @@ function isValidAppId(appId) {
 //  کد تخفیف سایت → رزرو لایسنس واقعی (Buskit-Tools purchase form)
 // ════════════════════════════════════════════════════════════════════════
 //
-// نگاشت شناسه‌ی محصول (همون pid هایی که در فرم خرید سایت/PURCHASE_ITEMS
-// استفاده می‌شن) به سطح و مدت لایسنس. عمداً این نگاشت اینجا، سمت سرور،
-// نگه داشته می‌شود — نه این‌که از خودِ درخواستِ مرورگر خونده بشه — تا کسی
-// نتونه با دستکاری بدنه‌ی درخواست HTTP یک لایسنس با سطح/مدت دلخواه (مثلاً
-// gold/lifetime) بگیرد. فقط کلیدهای زیر پذیرفته می‌شوند؛ هر چیز دیگری
-// (مثلاً محصولات سخت‌افزاری) نادیده گرفته می‌شود.
+// چون فقط یک محصول (لایسنس مادام‌العمر) می‌فروشی، این نگاشت هم به یک
+// ورودی محدود شده. اگه فرم خرید سایت هنوز فعاله، مطمئن شو فقط همین یک
+// productKey ("p1") رو به سرور می‌فرسته.
 const PRODUCT_LICENSE_MAP = {
-  p4: { tier: "bronze", license_type: "1month" },
-  p3: { tier: "bronze", license_type: "1year" },
-  p1: { tier: "bronze", license_type: "lifetime" },
-  p10: { tier: "silver", license_type: "1month" },
-  p9: { tier: "silver", license_type: "1year" },
-  p8: { tier: "silver", license_type: "lifetime" },
-  p7: { tier: "gold", license_type: "1month" },
-  p6: { tier: "gold", license_type: "1year" },
-  p2: { tier: "gold", license_type: "lifetime" },
+  p1: { tier: "gold", license_type: "lifetime" },
+};
+
+// ── نگاشت variant_id لمون‌اسکوییزی → سطح و مدت لایسنس ─────────────────────
+// فقط یک محصول/یک Variant می‌فروشی (لایسنس مادام‌العمر)، پس این نگاشت فقط
+// یک ورودی داره. مقدار 111001 رو با variant_id واقعی محصولت توی داشبورد
+// Lemon Squeezy (Products → آن محصول → Variant) جایگزین کن. این نگاشت
+// عمداً سمت سرور نگه داشته می‌شه (نه چیزی که از بدنه‌ی وبهوک خونده بشه)،
+// تا کسی نتونه با جعل payload لایسنس مجانی بگیره.
+const LS_VARIANT_LICENSE_MAP = {
+  2059669: { tier: "gold", license_type: "lifetime" },
 };
 
 // ── کد سیستمیِ «بدون کد تخفیف» ────────────────────────────────────────────
@@ -165,6 +177,24 @@ function generateLicenseCode() {
     code += LICENSE_CODE_ALPHABET[crypto.randomInt(LICENSE_CODE_ALPHABET.length)];
   }
   return code;
+}
+
+// ── ارسال ایمیل حاوی کد لایسنس به خریدار (بعد از تایید پرداخت Lemon Squeezy) ──
+async function sendLicenseEmail(email, name, licenseCode) {
+  await mailTransporter.sendMail({
+    from: `Buskit <${process.env.GMAIL_USER}>`,
+    to: email,
+    subject: "کد لایسنس Buskit شما",
+    html: `
+      <div dir="rtl" style="font-family: Tahoma, sans-serif;">
+        <p>سلام ${name || ""}،</p>
+        <p>از خرید شما ممنونیم. کد لایسنس مادام‌العمر شما:</p>
+        <h2 style="letter-spacing:2px;">${licenseCode}</h2>
+        <p>این کد رو داخل اپ، توی صفحه‌ی Activation وارد کنید تا اپ روی دستگاه‌تون فعال بشه.</p>
+        <p>هر لایسنس فقط روی یک دستگاه قابل فعال‌سازیه.</p>
+      </div>
+    `,
+  });
 }
 
 // ── بررسی سریع و فقط-خواندنیِ یک کد تخفیف (پیش‌نمایش درصد/مبلغ تخفیف در فرم
@@ -367,6 +397,142 @@ app.post("/create-order", async (req, res) => {
 });
 
 
+
+// ════════════════════════════════════════════════════════════════════════
+//  وبهوک Lemon Squeezy → ساخت خودکار لایسنس + ایمیل به خریدار
+// ════════════════════════════════════════════════════════════════════════
+// Lemon Squeezy بعد از هر سفارشِ موفق (پرداخت کامل) یک POST به این آدرس
+// می‌فرسته. جریان کار:
+//   ۱) امضای HMAC رو با signing secret چک می‌کنیم تا مطمئن بشیم درخواست
+//      واقعاً از Lemon Squeezy اومده (نه یک نفر که مستقیم این آدرس رو
+//      صدا زده تا لایسنس مجانی بگیره).
+//   ۲) فقط رویداد order_created با status=paid رو پردازش می‌کنیم.
+//   ۳) variant_id سفارش رو از LS_VARIANT_LICENSE_MAP (نگاشتِ امنِ سمت
+//      سرور، نه چیزی که از payload خونده بشه) به tier/duration تبدیل می‌کنیم.
+//   ۴) با یک تراکنش، هم سند لایسنس جدید (is_used:false) می‌سازیم هم سند
+//      lsOrders/{orderId} رو برای idempotency (چون Lemon Squeezy ممکنه
+//      همون وبهوک رو بیشتر از یک‌بار retry کنه).
+//   ۵) کد لایسنس رو با ایمیل به خریدار می‌فرستیم.
+// توجه: این مسیر باید همیشه (حتی وقتی خطای داخلی داریم و لاگ می‌کنیم) با
+// status نزدیک به 200 جواب بده وگرنه Lemon Squeezy مدام retry می‌کنه؛
+// فقط برای امضای نامعتبر 401 برمی‌گردونیم چون اونجا واقعاً می‌خوایم رد کنیم.
+app.post(
+  "/webhooks/lemonsqueezy",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    try {
+      const signature = req.headers["x-signature"];
+      if (!signature) {
+        return res.status(401).json({ error: "missing signature" });
+      }
+
+      const hmac = crypto.createHmac("sha256", process.env.LEMON_WEBHOOK_SECRET);
+      const digest = Buffer.from(hmac.update(req.body).digest("hex"), "utf8");
+      const received = Buffer.from(signature, "utf8");
+
+      if (
+        digest.length !== received.length ||
+        !crypto.timingSafeEqual(digest, received)
+      ) {
+        return res.status(401).json({ error: "invalid signature" });
+      }
+
+      const payload = JSON.parse(req.body.toString("utf8"));
+      const eventName = payload?.meta?.event_name;
+
+      // فقط سفارش‌های ساخته‌شده رو پردازش می‌کنیم؛ بقیه‌ی رویدادها (اگه بعداً
+      // subscription_* رو هم فعال کردی) رو فعلاً بی‌خیال می‌شیم
+      if (eventName !== "order_created") {
+        return res.status(200).json({ ok: true, ignored: eventName });
+      }
+
+      const attrs = payload?.data?.attributes;
+      const orderId = payload?.data?.id ? String(payload.data.id) : null;
+
+      if (!attrs || !orderId) {
+        console.error("وبهوک Lemon Squeezy با ساختار نامعتبر:", payload);
+        return res.status(200).json({ ok: true });
+      }
+
+      // سفارش تست (test mode) رو در پروداکشن نادیده بگیر
+      if (attrs.test_mode === true && process.env.NODE_ENV === "production") {
+        return res.status(200).json({ ok: true, ignored: "test_mode" });
+      }
+
+      if (attrs.status !== "paid") {
+        return res.status(200).json({ ok: true, ignored: attrs.status });
+      }
+
+      const email = attrs.user_email;
+      const name = attrs.user_name || "";
+      const variantId = attrs.first_order_item?.variant_id;
+      const info = LS_VARIANT_LICENSE_MAP[variantId];
+
+      if (!email || !info) {
+        console.error(
+          `وبهوک Lemon Squeezy: variant ناشناخته یا ایمیل خالی (variantId=${variantId}, order=${orderId})`,
+        );
+        return res.status(200).json({ ok: true });
+      }
+
+      const licenseCode = generateLicenseCode();
+      const orderRef = db.collection("lsOrders").doc(orderId);
+
+      const created = await db.runTransaction(async (tx) => {
+        const existing = await tx.get(orderRef);
+        if (existing.exists) {
+          // این orderId قبلاً پردازش شده (وبهوک تکراری) — چیزی نساز
+          return { alreadyProcessed: true, licenseCode: existing.data().licenseCode };
+        }
+
+        tx.set(db.collection("licenses").doc(licenseCode), {
+          tier: info.tier,
+          license_type: info.license_type,
+          is_shared: false,
+          is_used: false,
+          name,
+          email,
+          source: "lemonsqueezy",
+          ls_order_id: orderId,
+          delivered: false,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        tx.set(orderRef, {
+          email,
+          name,
+          licenseCode,
+          tier: info.tier,
+          licenseType: info.license_type,
+          processedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        return { alreadyProcessed: false, licenseCode };
+      });
+
+      // اگه وبهوک تکراری بود، دیگه دوباره ایمیل نفرست
+      if (!created.alreadyProcessed) {
+        try {
+          await sendLicenseEmail(email, name, created.licenseCode);
+          await db.collection("licenses").doc(created.licenseCode).update({
+            delivered: true,
+          });
+        } catch (mailErr) {
+          // اگه ایمیل fail بشه، لایسنس همچنان توی Firestore ساخته شده و
+          // delivered:false می‌مونه — می‌تونی بعداً از پنل ادمین دستی بفرستیش
+          console.error("خطا در ارسال ایمیل لایسنس:", mailErr);
+        }
+      }
+
+      return res.status(200).json({ ok: true });
+    } catch (err) {
+      console.error("خطا در وبهوک Lemon Squeezy:", err);
+      // 200 برمی‌گردونیم تا Lemon Squeezy بی‌نهایت retry نکنه؛ خطا لاگ شده
+      // و از پنل ادمین/لاگ‌ها قابل پیگیریه
+      return res.status(200).json({ ok: false });
+    }
+  },
+);
 
 // ── مسیر فعال‌سازی (ساین‌آپ - وقتی کاربر کد لایسنس رو دستی وارد می‌کنه) ──
 app.post("/activate", async (req, res) => {
@@ -581,7 +747,7 @@ app.post("/activate", async (req, res) => {
 });
 
 // ── مسیر ساین‌این (هر بار اجرای اپ — fingerprint + appId می‌فرسته) ───────
-// ترتیب چک: lifetime → 1year → 1month → 5days
+// ترتیب چک: lifetime → 5days (تریال)
 app.post("/signin", async (req, res) => {
   try {
     const { fingerprint, appId } = req.body;
