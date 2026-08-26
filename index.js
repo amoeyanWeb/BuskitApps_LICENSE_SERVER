@@ -187,13 +187,60 @@ async function sendLicenseEmail(email, name, licenseCode) {
   };
   sendSmtpEmail.to = [{ email, name: name || undefined }];
   sendSmtpEmail.subject = "کد لایسنس Buskit شما";
+
+  // ── کادر آبی جداکننده‌ی بین دو زبان — فقط اسم زبانِ بخش بعدی، وسط‌چین ──
+  const langDivider = (label) => `
+    <div style="background:#4472C4; color:#ffffff; text-align:center; font-weight:bold; padding:6px 0; margin:18px 0; border-radius:4px; font-family: Tahoma, Arial, sans-serif;">
+      ${label}
+    </div>
+  `;
+
   sendSmtpEmail.htmlContent = `
-    <div dir="rtl" style="font-family: Tahoma, sans-serif;">
-      <p>سلام ${name || ""}،</p>
-      <p>از خرید شما ممنونیم. کد لایسنس مادام‌العمر شما:</p>
-      <h2 style="letter-spacing:2px;">${licenseCode}</h2>
-      <p>این کد رو داخل اپ، توی صفحه‌ی Activation وارد کنید تا اپ روی دستگاه‌تون فعال بشه.</p>
-      <p>هر لایسنس فقط روی یک دستگاه قابل فعال‌سازیه.</p>
+    <div style="font-family: Tahoma, Arial, sans-serif;">
+
+      <!-- Türkçe -->
+      <div dir="ltr" style="text-align:left;">
+        <p>Merhaba ${name || ""},</p>
+        <p>Güveniniz ve satın alımınız için içtenlikle teşekkür ederiz. Bu uygulamayı kullanarak unutulmaz anlar yaratmanızı umuyoruz.</p>
+        <p>Ömür boyu geçerli lisans kodunuz:</p>
+        <h2 style="letter-spacing:2px;">${licenseCode}</h2>
+        <p>Uygulamayı etkinleştirmek için ilk girişte yukarıdaki kodu, uygulama içindeki Activation sayfasında belirtilen alana girin.</p>
+        <p>Not: Her lisans yalnızca bir cihazda etkinleştirilebilir.</p>
+        <p>Herhangi bir sorunla karşılaşırsanız veya yardıma ihtiyaç duyarsanız bizimle şu yollarla iletişime geçebilirsiniz:<br>
+        WhatsApp: 00905312691609<br>
+        Web sitesi: www.BuskitApps.onrender.com</p>
+      </div>
+
+      ${langDivider("English")}
+
+      <!-- English -->
+      <div dir="ltr" style="text-align:left;">
+        <p>Hello ${name || ""},</p>
+        <p>We are truly grateful for your trust and purchase. We hope you create unforgettable moments using this application.</p>
+        <p>Your lifetime license code:</p>
+        <h2 style="letter-spacing:2px;">${licenseCode}</h2>
+        <p>To activate the app, on first launch enter the code above in the designated field on the Activation page inside the app.</p>
+        <p>Note: Each license can only be activated on one device.</p>
+        <p>If you run into any issues or need assistance, you can reach us via:<br>
+        WhatsApp: 00905312691609<br>
+        Website: www.BuskitApps.onrender.com</p>
+      </div>
+
+      ${langDivider("فارسی")}
+
+      <!-- فارسی -->
+      <div dir="rtl" style="text-align:right;">
+        <p>سلام ${name || ""}،</p>
+        <p>از اعتماد و خرید شما بسیار سپاسگزاریم. امیدواریم با استفاده از این اپلیکیشن لحظاتی به یاد ماندنی خلق کنید.</p>
+        <p>کد لایسنس دائمی شما:</p>
+        <h2 style="letter-spacing:2px;">${licenseCode}</h2>
+        <p>برای فعال سازی اپلیکیشن، در هنگام اولین ورود، کد بالا را داخل اپلیکیشن در محل مشخص شده در صفحه‌ی Activation وارد کنید.</p>
+        <p>توجه: هر لایسنس فقط روی یک دستگاه قابل فعال‌سازی میباشد.</p>
+        <p>در صورت بروز هر گونه مشکل یا نیاز به هرگونه راهنمایی از طرق زیر می‌توانید با ما در تماس باشید:<br>
+        واتس‌آپ: 00905312691609<br>
+        وب‌سایت: www.BuskitApps.onrender.com</p>
+      </div>
+
     </div>
   `;
 
