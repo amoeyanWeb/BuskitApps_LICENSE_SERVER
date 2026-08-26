@@ -2,14 +2,6 @@ const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
 
-// ── اجبار به IPv4 برای همه‌ی DNS lookupها ────────────────────────────────
-// شبکه‌ی خروجی Render (پلن رایگان) مسیر IPv6 رو کامل ساپورت نمی‌کنه؛ بدون
-// این خط، Node موقع resolve کردن smtp.gmail.com معمولاً آدرس IPv6 رو
-// انتخاب می‌کنه و اتصال با خطای ENETUNREACH شکست می‌خوره. این تنظیم سراسریه
-// و همه‌ی DNS lookupهای کل اپ (نه فقط Gmail) رو تحت تأثیر قرار می‌ده که
-// برای این پروژه بی‌ضرره.
-require("dns").setDefaultResultOrder("ipv4first");
-
 const admin = require("firebase-admin");
 const crypto = require("crypto");
 
@@ -21,26 +13,17 @@ const db = admin.firestore();
 // ── کلید خصوصی ───────────────────────────────────────────────────────────
 const privateKey = process.env.PRIVATE_KEY.replace(/\\n/g, "\n");
 
-// ── سرویس ایمیل (Gmail SMTP از طریق nodemailer) ──────────────────────────
-// نیازی به دامنه یا verify شدن حساب کاربری در یک شرکت ثالث نیست؛ فقط یک
-// اکانت جیمیل معمولی با App Password لازمه. سقف رایگان Gmail SMTP حدود
-// ۵۰۰ ایمیل در روزه که برای این مرحله کافیه.
-//
-// نکته‌ی مهم: به‌جای shorthand «service: gmail» از host/port صریح استفاده
-// می‌کنیم و family:4 رو force می‌کنیم تا فقط IPv4 امتحان بشه — چون شبکه‌ی
-// خروجی Render (پلن رایگان) مسیر IPv6 رو کامل ساپورت نمی‌کنه و باعث خطای
-// ENETUNREACH موقع اتصال به smtp.gmail.com می‌شد.
-const nodemailer = require("nodemailer");
-const mailTransporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 465,
-  secure: true,
-  family: 4,
-  auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_APP_PASSWORD, // App Password، نه پسورد اصلی جیمیل
-  },
-});
+// ── سرویس ایمیل (Brevo — از طریق HTTP API، نه SMTP) ──────────────────────
+// چرا Brevo به‌جای Gmail SMTP: Render (پلن رایگان) پورت‌های خروجی SMTP
+// (۲۵/۴۶۵/۵۸۷) رو کاملاً مسدود می‌کنه — این یک محدودیت شناخته‌شده‌ی خودِ
+// Render روی همه‌ی SMTP providerهاست (Gmail، Zoho، هرچی)، نه چیزی که با
+// تنظیمات کد حل بشه. Brevo برخلاف nodemailer، از یک HTTP API (روی پورت
+// ۴۴۳، همون پورتی که هیچ‌وقت مسدود نمی‌شه) استفاده می‌کنه، پس این مشکل رو
+// نداره. پلن رایگانش ۳۰۰ ایمیل در روزه و نیازی به دامنه هم نداره.
+const SibApiV3Sdk = require("sib-api-v3-sdk");
+SibApiV3Sdk.ApiClient.instance.authentications["api-key"].apiKey =
+  process.env.BREVO_API_KEY;
+const brevoEmailApi = new SibApiV3Sdk.TransactionalEmailsApi();
 
 // ── Express ───────────────────────────────────────────────────────────────
 const app = express();
@@ -197,20 +180,24 @@ function generateLicenseCode() {
 
 // ── ارسال ایمیل حاوی کد لایسنس به خریدار (بعد از تایید پرداخت Lemon Squeezy) ──
 async function sendLicenseEmail(email, name, licenseCode) {
-  await mailTransporter.sendMail({
-    from: `Buskit <${process.env.GMAIL_USER}>`,
-    to: email,
-    subject: "کد لایسنس Buskit شما",
-    html: `
-      <div dir="rtl" style="font-family: Tahoma, sans-serif;">
-        <p>سلام ${name || ""}،</p>
-        <p>از خرید شما ممنونیم. کد لایسنس مادام‌العمر شما:</p>
-        <h2 style="letter-spacing:2px;">${licenseCode}</h2>
-        <p>این کد رو داخل اپ، توی صفحه‌ی Activation وارد کنید تا اپ روی دستگاه‌تون فعال بشه.</p>
-        <p>هر لایسنس فقط روی یک دستگاه قابل فعال‌سازیه.</p>
-      </div>
-    `,
-  });
+  const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+  sendSmtpEmail.sender = {
+    name: "Buskit",
+    email: process.env.BREVO_SENDER_EMAIL, // ← همون ایمیلی که توی Brevo verify کردی
+  };
+  sendSmtpEmail.to = [{ email, name: name || undefined }];
+  sendSmtpEmail.subject = "کد لایسنس Buskit شما";
+  sendSmtpEmail.htmlContent = `
+    <div dir="rtl" style="font-family: Tahoma, sans-serif;">
+      <p>سلام ${name || ""}،</p>
+      <p>از خرید شما ممنونیم. کد لایسنس مادام‌العمر شما:</p>
+      <h2 style="letter-spacing:2px;">${licenseCode}</h2>
+      <p>این کد رو داخل اپ، توی صفحه‌ی Activation وارد کنید تا اپ روی دستگاه‌تون فعال بشه.</p>
+      <p>هر لایسنس فقط روی یک دستگاه قابل فعال‌سازیه.</p>
+    </div>
+  `;
+
+  await brevoEmailApi.sendTransacEmail(sendSmtpEmail);
 }
 
 // ── بررسی سریع و فقط-خواندنیِ یک کد تخفیف (پیش‌نمایش درصد/مبلغ تخفیف در فرم
