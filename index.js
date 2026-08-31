@@ -931,6 +931,126 @@ app.post("/signin", async (req, res) => {
   }
 });
 
+// ── مسیر خروج از لایسنس (Log out — آزادسازی برای فعال‌سازی روی دستگاه دیگه) ──
+// اپ در این درخواست licenseCode (از توکن محلی)، fingerprint و appId
+// همین دستگاه رو می‌فرسته. دو حالت داریم:
+//   ۱) لایسنس اختصاصی (is_shared=false): با runTransaction دقیقاً مثل
+//      /activate چک می‌کنیم fingerprint+appId فرستاده‌شده واقعاً همون
+//      چیزیه که روی سند لایسنس ثبته، بعد is_used رو false می‌کنیم و
+//      fingerprint/appId/activated_at/expires_at رو پاک می‌کنیم تا
+//      لایسنس دوباره «دست‌نخورده» برای فعال‌سازی بعدی باشه.
+//   ۲) لایسنس مشترک/تریال (is_shared=true): به‌جای is_used، رکورد
+//      استفاده‌ی این «دستگاه+اپ» توی licenses/{code}/users/{safeId} حذف
+//      می‌شه (منطقاً بی‌فایده‌ست چون تریال محدود به یک دستگاهه، ولی برای
+//      یکدست بودن رفتار endpoint پیاده شده).
+// در هر دو حالت، در انتها ایندکس devices/{fingerprint__appId} هم آپدیت
+// می‌شه تا کلید همین licenseType از links پاک بشه (نه کل سند دستگاه،
+// چون ممکنه هم‌زمان لینک دیگه‌ای مثل تریال هم داشته باشه).
+app.post("/logout", async (req, res) => {
+  try {
+    const { licenseCode: rawLicenseCode, fingerprint, appId } = req.body;
+
+    if (!rawLicenseCode || !fingerprint || !appId) {
+      return res
+        .status(400)
+        .json({ error: "License code, fingerprint and appId are required" });
+    }
+
+    if (!isValidAppId(appId)) {
+      return res.status(400).json({ error: "Unknown appId" });
+    }
+
+    const licenseCode = rawLicenseCode.trim().toUpperCase();
+    const licenseRef = db.collection("licenses").doc(licenseCode);
+    const licenseDoc = await licenseRef.get();
+
+    if (!licenseDoc.exists) {
+      return res.status(404).json({ error: "Invalid license code" });
+    }
+
+    const data = licenseDoc.data();
+    const isShared = data.is_shared === true;
+    const licenseType = data.license_type ?? "lifetime";
+    const safeId = deviceAppId(fingerprint, appId);
+
+    if (isShared) {
+      // ════════════════════════════════════════════════════════════
+      // حالت ۱: لایسنس مشترک/تریال
+      // ════════════════════════════════════════════════════════════
+      const userRef = licenseRef.collection("users").doc(safeId);
+      const userDoc = await userRef.get();
+
+      if (
+        !userDoc.exists ||
+        userDoc.data().fingerprint !== fingerprint ||
+        userDoc.data().appId !== appId
+      ) {
+        return res
+          .status(403)
+          .json({ error: "This license is not linked to this device" });
+      }
+
+      await userRef.delete();
+    } else {
+      // ════════════════════════════════════════════════════════════
+      // حالت ۲: لایسنس اختصاصی — دقیقاً هم‌ساختار با تراکنش /activate
+      // ════════════════════════════════════════════════════════════
+      try {
+        await db.runTransaction(async (tx) => {
+          const freshDoc = await tx.get(licenseRef);
+          if (!freshDoc.exists) {
+            throw Object.assign(new Error("not-found"), { isLogoutErr: true });
+          }
+          const freshData = freshDoc.data();
+
+          if (
+            !freshData.is_used ||
+            freshData.fingerprint !== fingerprint ||
+            freshData.appId !== appId
+          ) {
+            throw Object.assign(new Error("not-owner"), { isLogoutErr: true });
+          }
+
+          tx.update(licenseRef, {
+            is_used: false,
+            fingerprint: admin.firestore.FieldValue.delete(),
+            appId: admin.firestore.FieldValue.delete(),
+            activated_at: admin.firestore.FieldValue.delete(),
+            expires_at: admin.firestore.FieldValue.delete(),
+          });
+        });
+      } catch (err) {
+        if (err.isLogoutErr) {
+          if (err.message === "not-found") {
+            return res.status(404).json({ error: "Invalid license code" });
+          }
+          return res
+            .status(403)
+            .json({ error: "This license is not linked to this device" });
+        }
+        throw err;
+      }
+    }
+
+    // ── پاک کردن ایندکس devices/{fingerprint__appId} ──────────────────
+    // فقط کلید همین licenseType از links حذف بشه؛ اگه سند دستگاه اصلاً
+    // وجود نداشته باشه update() خطای NOT_FOUND می‌ده که بی‌ضرره و می‌گیریمش
+    // (لایسنس روی سرور هر حال آزاد شده، این فقط پاکسازی ایندکسه).
+    await db
+      .collection("devices")
+      .doc(safeId)
+      .update({
+        [`links.${licenseType}`]: admin.firestore.FieldValue.delete(),
+      })
+      .catch(() => {});
+
+    return res.status(200).json({ success: true });
+  } catch (err) {
+    console.error("خطا در logout:", err);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
 // ── حذف کد تخفیف (فقط ادمین) ───────────────────────────────────────────────
 // Firestore Security Rules پروژه‌ی livefx-b43d5 اجازه‌ی delete مستقیم از
 // کلاینت رو نمی‌دن (برای همینه که پنل ادمین موقع حذف کد تخفیف خطای «دسترسی
