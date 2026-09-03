@@ -124,6 +124,67 @@ function resolveAppGeneration(licenseData) {
   return (licenseData && licenseData.appGeneration) || "v1";
 }
 
+// ════════════════════════════════════════════════════════════════════════
+//  اعلام سراسری ورژن/آپدیت اپ
+// ════════════════════════════════════════════════════════════════════════
+// هر appId یک سند مستقل در appVersions/{appId} داره:
+//   {
+//     version: 2, versionType: "free"|"paid",
+//     versionDownloadUrl, versionPurchaseUrl, versionNotes,
+//     update: 3, updateType: "free"|"paid",
+//     updateDownloadUrl, updatePurchaseUrl, updateNotes,
+//   }
+// "version" و "update" همیشه عددِ صرف هستن (نه رشته‌ی "v2"/"u3") — پیشوند
+// v/u فقط موقع ساختن پاسخ برای کلاینت اضافه می‌شه. هر بار که یک ورژن جدید
+// اعلام بشه (با /admin/announce-version)، update خودکار صفر می‌شه چون
+// آپدیت‌های ورژن قبلی دیگه به دردی نمی‌خورن.
+async function getVersionDoc(appId) {
+  const doc = await db.collection("appVersions").doc(appId).get();
+  return doc.exists ? doc.data() : null;
+}
+
+// کلاینت currentVersion/currentUpdate رو به‌صورت عدد می‌فرسته. اگه هنوز
+// چیزی روی سرور اعلام نشده (versionDoc=null)، یعنی آپدیتی مطرح نیست.
+// اگه هم ورژن هم آپدیتِ سرور از کلاینت جلوتره، ورژن اولویت داره (چون خودِ
+// ورژن جدید معمولاً شامل همه‌ی آپدیت‌های قبلی هم هست).
+function buildVersionInfo(versionDoc, clientVersion, clientUpdate) {
+  if (!versionDoc) return { updateAvailable: false };
+
+  const serverVersion = Number(versionDoc.version) || 1;
+  const serverUpdate = Number(versionDoc.update) || 0;
+  const cVersion = Number(clientVersion) || 0;
+  const cUpdate = Number(clientUpdate) || 0;
+
+  const newVersionAvailable = serverVersion > cVersion;
+  const newUpdateAvailable = !newVersionAvailable && serverUpdate > cUpdate;
+
+  if (!newVersionAvailable && !newUpdateAvailable) {
+    return { updateAvailable: false };
+  }
+
+  if (newVersionAvailable) {
+    return {
+      updateAvailable: true,
+      kind: "version",
+      label: `v${serverVersion}`,
+      type: versionDoc.versionType || "free",
+      downloadUrl: versionDoc.versionDownloadUrl || null,
+      purchaseUrl: versionDoc.versionPurchaseUrl || null,
+      notes: versionDoc.versionNotes || "",
+    };
+  }
+
+  return {
+    updateAvailable: true,
+    kind: "update",
+    label: `u${serverUpdate}`,
+    type: versionDoc.updateType || "free",
+    downloadUrl: versionDoc.updateDownloadUrl || null,
+    purchaseUrl: versionDoc.updatePurchaseUrl || null,
+    notes: versionDoc.updateNotes || "",
+  };
+}
+
 // ── ثبت/به‌روزرسانی ایندکس devices/{fingerprint__appId} ──────────────────
 // این ایندکس باعث میشه /signin بتونه با یک خوندن بفهمه این ترکیب
 // «گوشی + اپ» توی کدوم سطح(ها)ی لایسنس عضویت داره.
@@ -834,6 +895,11 @@ app.post("/signin", async (req, res) => {
       // پایین‌تر روی سند دستگاه به‌روزش می‌کنیم تا همیشه نشون بده کلاینتِ
       // کدوم نسل، آخرین‌بار با این fingerprint ساین‌این کرده.
       appGeneration,
+      // ورژن/آپدیت (عدد) همین نصبی که داره ساین‌این می‌کنه — برای اعلام
+      // سراسری ورژن/آپدیت جدید استفاده می‌شه (نسخه‌های خیلی قدیمی اپ که
+      // این فیلدها رو نمی‌فرستن هم مشکلی پیش نمیاد: 0 در نظر گرفته می‌شن).
+      currentVersion,
+      currentUpdate,
     } = req.body;
 
     if (!fingerprint || !appId) {
@@ -846,12 +912,16 @@ app.post("/signin", async (req, res) => {
       return res.status(400).json({ status: "error", error: "Unknown appId" });
     }
 
+    // ── اعلام ورژن/آپدیت: مستقل از وضعیت لایسنس، همراه هر پاسخ برمی‌گرده ──
+    const versionDoc = await getVersionDoc(appId);
+    const versionInfo = buildVersionInfo(versionDoc, currentVersion, currentUpdate);
+
     const safeId = deviceAppId(fingerprint, appId);
     const deviceRef = db.collection("devices").doc(safeId);
     const deviceDoc = await deviceRef.get();
 
     if (!deviceDoc.exists) {
-      return res.status(200).json({ status: "signup_required" });
+      return res.status(200).json({ status: "signup_required", versionInfo });
     }
 
     // نسل اپ فعلی رو روی سند دستگاه به‌روز نگه می‌داریم (بی‌ضرر، فقط برای
@@ -903,6 +973,7 @@ app.post("/signin", async (req, res) => {
           licenseType: durationType,
           tier,
           licenseCode,
+          versionInfo,
         });
       }
 
@@ -921,10 +992,11 @@ app.post("/signin", async (req, res) => {
         tier,
         licenseCode,
         expiresAt,
+        versionInfo,
       });
     }
 
-    return res.status(200).json({ status: "signup_required" });
+    return res.status(200).json({ status: "signup_required", versionInfo });
   } catch (err) {
     console.error("خطا در signin:", err);
     return res.status(500).json({ status: "error", error: "Server error" });
@@ -1048,6 +1120,162 @@ app.post("/logout", async (req, res) => {
   } catch (err) {
     console.error("خطا در logout:", err);
     return res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ── میدل‌ور احراز هویت ادمین (Firebase idToken) ─────────────────────────
+// دقیقاً همون روشی که پایین‌تر /admin/discount/:code استفاده می‌کنه: کلاینتِ
+// پنل ادمین idToken کاربریِ که توی پروژه لاگین کرده رو توی هدر Authorization
+// (Bearer ...) می‌فرسته.
+async function requireAdmin(req, res, next) {
+  try {
+    const authHeader = req.headers.authorization || "";
+    const idToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    if (!idToken) {
+      return res.status(401).json({ status: "error", error: "توکن ورود ارسال نشده" });
+    }
+    await admin.auth().verifyIdToken(idToken);
+    next();
+  } catch (err) {
+    return res.status(401).json({ status: "error", error: "دسترسی نامعتبر یا خطای سرور" });
+  }
+}
+
+// ── اعلام ورژن جدید (فقط ادمین) ─────────────────────────────────────────
+// body: { appId, version, versionType: "free"|"paid", versionDownloadUrl,
+//          versionPurchaseUrl, versionNotes }
+// اعلام ورژن جدید همیشه شمارنده‌ی آپدیت (u) رو برای همین appId صفر می‌کنه.
+app.post("/admin/announce-version", requireAdmin, async (req, res) => {
+  try {
+    const {
+      appId,
+      version,
+      versionType,
+      versionDownloadUrl,
+      versionPurchaseUrl,
+      versionNotes,
+    } = req.body;
+
+    if (!isValidAppId(appId)) {
+      return res.status(400).json({ status: "error", error: "Unknown appId" });
+    }
+    if (!version || !Number.isFinite(Number(version)) || Number(version) <= 0) {
+      return res.status(400).json({ status: "error", error: "Invalid version number" });
+    }
+    if (versionType !== "free" && versionType !== "paid") {
+      return res
+        .status(400)
+        .json({ status: "error", error: "versionType must be 'free' or 'paid'" });
+    }
+    if (versionType === "free" && !versionDownloadUrl) {
+      return res
+        .status(400)
+        .json({ status: "error", error: "versionDownloadUrl is required for a free version" });
+    }
+    if (versionType === "paid" && !versionPurchaseUrl) {
+      return res
+        .status(400)
+        .json({ status: "error", error: "versionPurchaseUrl is required for a paid version" });
+    }
+
+    await db.collection("appVersions").doc(appId).set(
+      {
+        version: Number(version),
+        versionType,
+        versionDownloadUrl: versionDownloadUrl || null,
+        versionPurchaseUrl: versionPurchaseUrl || null,
+        versionNotes: versionNotes || "",
+        // اعلام ورژن جدید یعنی آپدیت‌های ورژن قبلی دیگه بی‌معنی‌ان
+        update: 0,
+        updateType: "free",
+        updateDownloadUrl: null,
+        updatePurchaseUrl: null,
+        updateNotes: "",
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+
+    return res.status(200).json({ status: "ok" });
+  } catch (err) {
+    console.error("خطا در announce-version:", err);
+    return res.status(500).json({ status: "error", error: "Server error" });
+  }
+});
+
+// ── اعلام آپدیت جدید برای ورژن فعلی (فقط ادمین) ─────────────────────────
+// body: { appId, update, updateType: "free"|"paid", updateDownloadUrl,
+//          updatePurchaseUrl, updateNotes }
+// باید قبلش حداقل یک بار /admin/announce-version برای همین appId زده شده باشه.
+app.post("/admin/announce-update", requireAdmin, async (req, res) => {
+  try {
+    const {
+      appId,
+      update,
+      updateType,
+      updateDownloadUrl,
+      updatePurchaseUrl,
+      updateNotes,
+    } = req.body;
+
+    if (!isValidAppId(appId)) {
+      return res.status(400).json({ status: "error", error: "Unknown appId" });
+    }
+    if (!update || !Number.isFinite(Number(update)) || Number(update) <= 0) {
+      return res.status(400).json({ status: "error", error: "Invalid update number" });
+    }
+    if (updateType !== "free" && updateType !== "paid") {
+      return res
+        .status(400)
+        .json({ status: "error", error: "updateType must be 'free' or 'paid'" });
+    }
+    if (updateType === "free" && !updateDownloadUrl) {
+      return res
+        .status(400)
+        .json({ status: "error", error: "updateDownloadUrl is required for a free update" });
+    }
+    if (updateType === "paid" && !updatePurchaseUrl) {
+      return res
+        .status(400)
+        .json({ status: "error", error: "updatePurchaseUrl is required for a paid update" });
+    }
+
+    const ref = db.collection("appVersions").doc(appId);
+    const existing = await ref.get();
+    if (!existing.exists) {
+      return res.status(400).json({
+        status: "error",
+        error: "No version announced yet for this appId — call /admin/announce-version first.",
+      });
+    }
+
+    await ref.set(
+      {
+        update: Number(update),
+        updateType,
+        updateDownloadUrl: updateDownloadUrl || null,
+        updatePurchaseUrl: updatePurchaseUrl || null,
+        updateNotes: updateNotes || "",
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+
+    return res.status(200).json({ status: "ok" });
+  } catch (err) {
+    console.error("خطا در announce-update:", err);
+    return res.status(500).json({ status: "error", error: "Server error" });
+  }
+});
+
+// ── مشاهده‌ی وضعیت فعلی ورژن/آپدیت یک اپ (فقط ادمین) ─────────────────────
+app.get("/admin/version-info/:appId", requireAdmin, async (req, res) => {
+  try {
+    const versionDoc = await getVersionDoc(req.params.appId);
+    return res.status(200).json({ status: "ok", data: versionDoc || null });
+  } catch (err) {
+    console.error("خطا در version-info:", err);
+    return res.status(500).json({ status: "error", error: "Server error" });
   }
 });
 
