@@ -1279,6 +1279,59 @@ app.get("/admin/version-info/:appId", requireAdmin, async (req, res) => {
   }
 });
 
+// ── لغو کامل اعلام ورژن یک اپ (فقط ادمین) ─────────────────────────────────
+// کل سند appVersions/{appId} پاک می‌شه — یعنی انگار هیچ‌وقت ورژن/آپدیتی
+// برای این اپ اعلام نشده (چون آپدیت هم زیرمجموعه‌ی همون ورژنه، با پاک شدن
+// ورژن، آپدیتش هم به‌صورت خودکار حذف می‌شه). برای وقتی که یک ورژن رو
+// اشتباهی اعلام کردی و می‌خوای کامل برگردی عقب.
+app.delete("/admin/version/:appId", requireAdmin, async (req, res) => {
+  try {
+    const { appId } = req.params;
+    if (!isValidAppId(appId)) {
+      return res.status(400).json({ status: "error", error: "Unknown appId" });
+    }
+    await db.collection("appVersions").doc(appId).delete();
+    return res.status(200).json({ status: "ok" });
+  } catch (err) {
+    console.error("خطا در حذف ورژن:", err);
+    return res.status(500).json({ status: "error", error: "Server error" });
+  }
+});
+
+// ── لغو فقط اعلام آپدیت یک اپ (فقط ادمین) ─────────────────────────────────
+// خود ورژن دست‌نخورده می‌مونه؛ فقط فیلدهای آپدیت به حالت «هیچ آپدیتی اعلام
+// نشده» برمی‌گردن (update=0). برای وقتی که فقط پشیمون شدی از یک آپدیتِ
+// روی ورژن فعلی، نه از خود ورژن.
+app.delete("/admin/update/:appId", requireAdmin, async (req, res) => {
+  try {
+    const { appId } = req.params;
+    if (!isValidAppId(appId)) {
+      return res.status(400).json({ status: "error", error: "Unknown appId" });
+    }
+    const ref = db.collection("appVersions").doc(appId);
+    const existing = await ref.get();
+    if (!existing.exists) {
+      // چیزی برای لغو کردن وجود نداره — این خودش خطا نیست
+      return res.status(200).json({ status: "ok" });
+    }
+    await ref.set(
+      {
+        update: 0,
+        updateType: "free",
+        updateDownloadUrl: null,
+        updatePurchaseUrl: null,
+        updateNotes: "",
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+    return res.status(200).json({ status: "ok" });
+  } catch (err) {
+    console.error("خطا در حذف آپدیت:", err);
+    return res.status(500).json({ status: "error", error: "Server error" });
+  }
+});
+
 // ── حذف کد تخفیف (فقط ادمین) ───────────────────────────────────────────────
 // Firestore Security Rules پروژه‌ی livefx-b43d5 اجازه‌ی delete مستقیم از
 // کلاینت رو نمی‌دن (برای همینه که پنل ادمین موقع حذف کد تخفیف خطای «دسترسی
