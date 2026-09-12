@@ -27,7 +27,11 @@ const brevoEmailApi = new SibApiV3Sdk.TransactionalEmailsApi();
 
 // ── Express ───────────────────────────────────────────────────────────────
 const app = express();
-app.use(cors());
+app.use(
+  cors({
+    origin: ["https://buskitapps.com", "https://buskitapps.onrender.com"],
+  }),
+);
 
 // ── body parser ──────────────────────────────────────────────────────────
 // نکته‌ی مهم: مسیر وبهوک Lemon Squeezy باید body رو به‌صورت خام (raw buffer)
