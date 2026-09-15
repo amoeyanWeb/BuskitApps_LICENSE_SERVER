@@ -27,9 +27,26 @@ const brevoEmailApi = new SibApiV3Sdk.TransactionalEmailsApi();
 
 // ── Express ───────────────────────────────────────────────────────────────
 const app = express();
+// ── دامنه‌های مجاز برای CORS — case-insensitive چک می‌شن، پس فرقی نمی‌کنه
+// کسی آدرس رو با حروف بزرگ/کوچیک بزنه (مثلاً BuskitApps.com هم قبول می‌شه) ──
+const ALLOWED_ORIGINS = [
+  "https://buskitapps.com",
+  "https://www.buskitapps.com",
+  "https://buskitapps.onrender.com",
+];
 app.use(
   cors({
-    origin: ["https://buskitapps.com", "https://buskitapps.onrender.com"],
+    origin: (origin, callback) => {
+      // درخواست‌های بدون هدر Origin (مثل curl، Postman، یا سرور-به-سرور) رو رد نکن
+      if (!origin) return callback(null, true);
+      const normalizedOrigin = origin.toLowerCase();
+      const isAllowed = ALLOWED_ORIGINS.some(
+        (allowed) => allowed.toLowerCase() === normalizedOrigin,
+      );
+      return isAllowed
+        ? callback(null, true)
+        : callback(new Error("Not allowed by CORS"));
+    },
   }),
 );
 
