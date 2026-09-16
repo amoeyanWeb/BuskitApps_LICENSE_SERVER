@@ -1,170 +1,126 @@
-/**
- * generate-licenses.js
- * ─────────────────────────────────────────────────────────────
- * ساخت و آپلود لایسنس‌ها در Firestore
- *
- * هر لایسنس دو محور مستقل داره:
- *   - license_type : مدت زمان  → "1month" | "1year" | "lifetime" | "5days"
- *                     (این دقیقاً همون کلیدهاییه که index.js/LICENSE_DURATIONS
- *                      می‌شناسه — اگه این مقدار هرچیز دیگه‌ای باشه، سرور
- *                      فعال‌سازی رو با خطای "Invalid license type" رد می‌کنه)
- *   - tier          : سطح امکانات → "gold" | "silver" | "bronze"
- *                     (این فیلده که به توکن امضاشده اضافه میشه و اپ روش
- *                      FeatureGate رو اجرا می‌کنه)
- *
- * اجرا:
- *   npm install firebase-admin
- *   node generate-licenses.js
- *
- * پیش‌نیاز:
- *   فایل serviceAccount.json رو کنار این فایل بذار
- *   (از Firebase Console → Project Settings → Service Accounts دانلود کن)
- * ─────────────────────────────────────────────────────────────
- */
+// ════════════════════════════════════════════════════════════════════════
+//  🎫 اسکریپت تولید انبوه لایسنس‌های دائمی (lifetime) — بدون هیچ محدودیت زمانی
+// ════════════════════════════════════════════════════════════════════════
+// این اسکریپت هیچ ربطی به سرور index.js نداره و جدا اجرا می‌شه (یک‌بار،
+// روی کامپیوتر خودت). مستقیم توی همون پروژه‌ی Firestore که سرورت بهش وصله
+// یک‌سری سند در کالکشن licenses می‌سازه — دقیقاً با همون فرمتی که /activate
+// و /signin انتظارش رو دارن (tier/license_type/is_shared/is_used).
+//
+// ── استفاده ─────────────────────────────────────────────────────────────
+//   1) این فایل رو کنار index.js (همون پوشه‌ی پروژه‌ی سرور) بذار، چون به
+//      همون firebase-admin که آنجا نصبه نیاز داره.
+//   2) اگه سرورت روی Render با متغیر محیطی SERVICE_ACCOUNT اجرا می‌شه،
+//      کافیه یک فایل .env محلی (یا export مستقیم توی ترمینال) با همون
+//      متغیر SERVICE_ACCOUNT (رشته‌ی JSON کامل Service Account) بسازی.
+//      اگه نه، یک فایل serviceAccountKey.json از Firebase Console
+//      (Project settings → Service accounts → Generate new private key)
+//      دانلود کن و کنار این اسکریپت بذار.
+//   3) اجرا:
+//        node generate-licenses.js 50
+//      عدد آخر تعداد لایسنس‌های موردنظره (پیش‌فرض: 10).
+//   4) بعد از اجرا، یک فایل licenses-<تاریخ>.csv کنار همین اسکریپت ساخته
+//      می‌شه که هم کدها رو داره هم می‌تونی مستقیم برای هرکسی که فرستادی
+//      یادداشت کنی به کی دادی (ستون‌های name/email/note رو دستی پر کن).
 
 const admin = require("firebase-admin");
 const crypto = require("crypto");
 const fs = require("fs");
+const path = require("path");
 
-// ── Firebase init ─────────────────────────────────────────────
-const serviceAccount = require("./serviceAccount.json");
+// ── اتصال به Firebase (همون منطق سرور، با یک fallback به فایل محلی) ──────
+let serviceAccount;
+if (process.env.SERVICE_ACCOUNT) {
+  serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT);
+} else {
+  const keyPath = path.join(__dirname, "serviceAccountKey.json");
+  if (!fs.existsSync(keyPath)) {
+    console.error(
+      "❌ نه متغیر محیطی SERVICE_ACCOUNT ست شده، نه فایل serviceAccountKey.json کنار این اسکریپت پیدا شد.\n" +
+        "   یکی از این دو راه رو انجام بده (توضیحات بالای همین فایل رو ببین) و دوباره اجرا کن.",
+    );
+    process.exit(1);
+  }
+  serviceAccount = JSON.parse(fs.readFileSync(keyPath, "utf8"));
+}
+
 admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 const db = admin.firestore();
 
-// ── تنظیمات ──────────────────────────────────────────────────
-const BATCH_SIZE = 490; // Firestore هر batch حداکثر 500 عملیات
-
-// هر ترکیب (tier × duration) یک plan جداست.
-// count رو هرجا خواستید عوض کنید — الان هرکدوم 20 تاست (جمعاً 9×20 = 180 لایسنس).
-const PLANS = [
-  { tier: "gold",   duration: "1month",   prefix: "GL1M", count: 20 },
-  { tier: "gold",   duration: "1year",    prefix: "GL1Y", count: 20 },
-  { tier: "gold",   duration: "lifetime", prefix: "GLLT", count: 20 },
-
-  { tier: "silver", duration: "1month",   prefix: "SV1M", count: 20 },
-  { tier: "silver", duration: "1year",    prefix: "SV1Y", count: 20 },
-  { tier: "silver", duration: "lifetime", prefix: "SVLT", count: 20 },
-
-  { tier: "bronze", duration: "1month",   prefix: "BZ1M", count: 20 },
-  { tier: "bronze", duration: "1year",    prefix: "BZ1Y", count: 20 },
-  { tier: "bronze", duration: "lifetime", prefix: "BZLT", count: 20 },
-];
-
-// ── لایسنس تریال ۵روزه‌ی رایگان (مشترک بین همه‌ی نصب‌ها) ────────────────
-// برخلاف بقیه‌ی پلن‌ها، این is_shared:true هست و count نداره — فقط یک سند
-// با کد ثابت ساخته می‌شه. همه‌ی کاربرا (هرکسی که اپ رو تازه نصب می‌کنه) با
-// همین یک کد فعال می‌شن؛ سرور خودش هر device+appId رو جدا توی
-// licenses/{TRIAL_CODE}/users/{fingerprint__appId} ثبت و ۵روزه محدود می‌کنه.
-const TRIAL_CODE = "FREETRIAL5"; // اگه می‌خواید اسم/کد دیگه‌ای باشه همینجا عوض کنید
-const TRIAL_TIER = "gold";       // طبق قرارمون: تریال همیشه با امکانات طلایی اجرا می‌شه
-
-async function ensureTrialLicense() {
-  console.log(`\n▶ بررسی/ساخت لایسنس تریال مشترک «${TRIAL_CODE}» (5days, ${TRIAL_TIER}) ...`);
-  const ref = db.collection("licenses").doc(TRIAL_CODE);
-  const existing = await ref.get();
-  if (existing.exists) {
-    console.log("  ↷ از قبل وجود داره، دست نمی‌زنیم (تا رکوردهای users زیرش از بین نره).");
-    return;
+// ── همون الفبا و روش تولید کدِ سرور (بدون حروف/ارقام شبیه‌به‌هم مثل O/0, I/1) ──
+const LICENSE_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+function generateLicenseCode() {
+  let code = "";
+  for (let i = 0; i < 10; i++) {
+    code += LICENSE_CODE_ALPHABET[crypto.randomInt(LICENSE_CODE_ALPHABET.length)];
   }
-  await ref.set({
-    license_type: "5days",
-    tier: TRIAL_TIER,
-    is_shared: true,
-    total_activations: 0,
-    created_at: admin.firestore.Timestamp.now(),
-  });
-  console.log("  ✓ ساخته شد.");
+  return code;
 }
 
-// ── ساخت کد تصادفی ───────────────────────────────────────────
-// فرمت:  PREFIX-XXXX-XXXX-XXXX   (X = حرف بزرگ یا عدد)
-function randomSegment(len = 4) {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // بدون I,O,1,0 (گیج‌کننده)
-  let s = "";
-  for (let i = 0; i < len; i++) {
-    s += chars[crypto.randomInt(chars.length)];
-  }
-  return s;
+// ── فیلدهای سند لایسنس — دقیقاً هم‌شکل با چیزی که create-order/webhook ──
+// برای یک لایسنس دائمی (لایف‌تایم) می‌سازن؛ یعنی expires_at اصلاً ست
+// نمی‌شه (نامحدود)، و is_used:false یعنی هنوز روی هیچ گوشی‌ای فعال نشده —
+// اولین گوشی‌ای که این کد رو توی اپ وارد کنه، صاحبش می‌شه.
+function buildLifetimeLicenseDoc() {
+  return {
+    tier: "gold",
+    license_type: "lifetime",
+    appGeneration: "v1",
+    is_shared: false,
+    is_used: false,
+    source: "manual-batch", // فقط برای تشخیص در پنل ادمین/گزارش‌گیری
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  };
 }
 
-function generateCode(prefix) {
-  return `${prefix}-${randomSegment()}-${randomSegment()}-${randomSegment()}`;
-}
-
-// ── آپلود با batch ────────────────────────────────────────────
-async function uploadBatch(docs) {
-  for (let i = 0; i < docs.length; i += BATCH_SIZE) {
-    const chunk = docs.slice(i, i + BATCH_SIZE);
-    const batch = db.batch();
-    for (const { id, data } of chunk) {
-      batch.set(db.collection("licenses").doc(id), data);
-    }
-    await batch.commit();
-    console.log(`  ✓ آپلود شد: ${i + chunk.length} / ${docs.length}`);
-  }
-}
-
-// ── تولید و آپلود همه لایسنس‌ها ──────────────────────────────
 async function main() {
-  await ensureTrialLicense();
-
-  const usedCodes = new Set(); // جلوگیری از تکرار کد
-  const csvRows = ["code,tier,duration"]; // برای بایگانی خروجی
-  csvRows.push(`${TRIAL_CODE},${TRIAL_TIER},5days`);
-
-  let totalCount = 0;
-
-  for (const plan of PLANS) {
-    console.log(
-      `\n▶ در حال ساخت ${plan.count} لایسنس ${plan.tier}/${plan.duration} (${plan.prefix}) ...`,
-    );
-
-    const docs = [];
-    let attempts = 0;
-
-    while (docs.length < plan.count) {
-      attempts++;
-      if (attempts > plan.count * 10) {
-        throw new Error("خیلی زیاد تلاش شد — احتمالاً تصادم کد");
-      }
-
-      const code = generateCode(plan.prefix);
-      if (usedCodes.has(code)) continue;
-      usedCodes.add(code);
-
-      docs.push({
-        id: code,
-        data: {
-          license_type: plan.duration, // "1month" | "1year" | "lifetime" — باید دقیقاً یکی از کلیدهای LICENSE_DURATIONS در index.js باشه
-          tier: plan.tier,              // "gold" | "silver" | "bronze"
-          is_shared: false,
-          is_used: false,
-          fingerprint: null,
-          appId: null,
-          activated_at: null,
-          expires_at: null,
-          created_at: admin.firestore.Timestamp.now(),
-        },
-      });
-
-      csvRows.push(`${code},${plan.tier},${plan.duration}`);
-    }
-
-    await uploadBatch(docs);
-    totalCount += docs.length;
-    console.log(`✅ ${docs.length} لایسنس ${plan.tier}/${plan.duration} آپلود شد`);
+  const count = parseInt(process.argv[2], 10) || 10;
+  if (count <= 0 || count > 500) {
+    console.error("❌ تعداد باید بین ۱ تا ۵۰۰ باشه (برای اعداد بزرگ‌تر، چندبار اجرا کن).");
+    process.exit(1);
   }
 
-  console.log(`\n🎉 همه‌ی ${totalCount} لایسنس با موفقیت در Firestore ذخیره شدند`);
+  console.log(`در حال ساخت ${count} لایسنس دائمی...`);
 
-  // ── ذخیره CSV برای بایگانی (کد + سطح + مدت، مستقیم از داده‌ی واقعی) ──
-  fs.writeFileSync("licenses_export.csv", csvRows.join("\n"), "utf8");
-  console.log("📄 فایل licenses_export.csv هم ذخیره شد (نگه‌دار!)");
+  const codes = [];
+  const licensesRef = db.collection("licenses");
 
-  process.exit(0);
+  // ── تولید کدهای یکتا: هر کد رو قبل از رزرو چک می‌کنیم که توی همین دسته
+  // یا توی Firestore تکراری نباشه (برخورد عملاً غیرممکنه، ولی محکم‌کاریه) ──
+  const seen = new Set();
+  while (codes.length < count) {
+    const code = generateLicenseCode();
+    if (seen.has(code)) continue;
+    const existing = await licensesRef.doc(code).get();
+    if (existing.exists) continue;
+    seen.add(code);
+    codes.push(code);
+  }
+
+  // ── نوشتن همه‌ی اسناد در یک batch اتمیک (حداکثر ۵۰۰ نوشتن در هر batch) ──
+  const batch = db.batch();
+  codes.forEach((code) => {
+    batch.set(licensesRef.doc(code), buildLifetimeLicenseDoc());
+  });
+  await batch.commit();
+
+  console.log(`✅ ${codes.length} لایسنس دائمی با موفقیت در Firestore ساخته شد.`);
+
+  // ── خروجی CSV کنار همین اسکریپت — ستون‌های name/email/note رو خودت بعداً
+  // دستی، هر کد رو که به کسی دادی، پر کن (فقط برای پیگیری خودت، هیچ اثری
+  // روی خودِ لایسنس نداره) ──
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const outPath = path.join(__dirname, `licenses-${stamp}.csv`);
+  const csvLines = ["license_code,name,email,note", ...codes.map((c) => `${c},,,`)];
+  fs.writeFileSync(outPath, csvLines.join("\n"), "utf8");
+
+  console.log(`📄 لیست کدها اینجا ذخیره شد: ${outPath}`);
+  console.log("");
+  codes.forEach((c) => console.log("  " + c));
 }
 
-main().catch((err) => {
-  console.error("❌ خطا:", err);
-  process.exit(1);
-});
+main()
+  .then(() => process.exit(0))
+  .catch((err) => {
+    console.error("❌ خطا در ساخت لایسنس‌ها:", err);
+    process.exit(1);
+  });

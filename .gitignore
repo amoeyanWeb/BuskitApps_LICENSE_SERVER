@@ -1,4 +1,5 @@
 node_modules/
 serviceAccount.json
+serviceAccountKey.json
 private_key.pem
 .env
