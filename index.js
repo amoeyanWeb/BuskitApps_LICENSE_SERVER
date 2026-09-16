@@ -10,6 +10,258 @@ const serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT);
 admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 const db = admin.firestore();
 
+// ══════════════════════════════════════════════════════════════════════════
+// ── نرخ ارز (دلار/لیر و دلار/ریال بازار آزاد) ───────────────────────────────
+// این بخش دو نرخ را خودکار و روزانه می‌گیرد و در سند Firestore به آدرس
+// rates/latest ذخیره می‌کند؛ همان سندی که کلاینت (script.js، تابع
+// fetchTryToIrrRate) مستقیماً از Firestore می‌خواند — پس صفحه‌ی خرید لایسنس
+// بدون نیاز به هیچ مسیر جدیدی، به‌محض باز شدن مودال (یا رفرش ساعتیِ خودش)
+// آخرین نرخ ذخیره‌شده را نشان می‌دهد.
+//
+// زمان‌بندی (به وقت استانبول — ترکیه ساعت تابستانی/زمستانی ندارد، همیشه UTC+3):
+//   • ساعت ۱۳:۰۰ → نرخ دلار به لیر: اول doviz.com، اگر جواب نداد Frankfurter.
+//   • ساعت ۱۵:۰۰ → نرخ دلار به ریال بازار آزاد: اول bonbast، اگر جواب نداد brsapi.
+//   • اگر هر دو منبع یک نرخ شکست بخورند، هر ۳۰ دقیقه دوباره تلاش می‌شود تا
+//     موفق شود؛ در تمام این مدت آخرین نرخ معتبر قبلی (چه مال امروز چه دیروز)
+//     همچنان روی سایت نمایش داده می‌شود — هیچ‌وقت نرخ با مقدار خالی/صفر
+//     جایگزین نمی‌شود.
+//
+// نکته‌ی مهم درباره‌ی منابع: doviz.com هیچ API عمومی رسمی‌ای منتشر نکرده و
+// دسترسی برنامه‌نویسی به آن را عملاً مسدود می‌کند؛ همین‌طور «ارزهام» /
+// apiDeveloper که اشاره کردی آدرس دقیقشان برایم قابل تأیید نبود. برای همین
+// در ادامه از bonbast (منبع رایگان و شناخته‌شده‌ی نرخ بازار آزاد ریال) و
+// brsapi به‌عنوان جایگزین استفاده شده. اگر آدرس دقیق مدنظرت را داری، کافیست
+// در همین دو تابع (fetchUsdIrrFromBonbast / fetchUsdIrrFromBrsApi، یا
+// fetchUsdTryFromDovizCom) فقط URL و نگاشت فیلدها را عوض کنی؛ بقیه‌ی سیستم
+// (زمان‌بندی، تلاش مجدد، کش، ذخیره در Firestore) دست‌نخورده کار می‌کند.
+// ══════════════════════════════════════════════════════════════════════════
+const RATES_DOC_REF = db.collection("rates").doc("latest");
+const ISTANBUL_TZ = "Europe/Istanbul";
+const RATE_RETRY_INTERVAL_MS = 30 * 60 * 1000; // نیم ساعت
+
+// آخرین نرخ‌های معتبر در حافظه (برای جلوگیری از خواندن مکرر Firestore)
+const latestRates = {
+  usdToTry: null, // ۱ دلار = چند لیر
+  usdToTrySource: null,
+  usdToTryUpdatedAt: null,
+  usdToIrr: null, // ۱ دلار = چند ریال (بازار آزاد)
+  usdToIrrSource: null,
+  usdToIrrUpdatedAt: null,
+};
+const rateJobRetryTimers = { usdTry: null, usdIrr: null };
+
+// ── منبع ۱ برای نرخ دلار/لیر: doviz.com ────────────────────────────────────
+async function fetchUsdTryFromDovizCom() {
+  const res = await fetch("https://www.doviz.com/api/v1/currencies/all/latest", {
+    headers: { "User-Agent": "Mozilla/5.0 (compatible; BuskitRateBot/1.0)" },
+  });
+  if (!res.ok) throw new Error(`doviz.com پاسخ HTTP ${res.status} داد`);
+  const json = await res.json();
+  const list = Array.isArray(json) ? json : json?.data || Object.values(json || {});
+  const usdItem = list.find(
+    (it) => (it?.code || it?.symbol || it?.Symbol || "").toString().toUpperCase() === "USD",
+  );
+  const buy = Number(usdItem?.buying ?? usdItem?.buy ?? usdItem?.Alis ?? usdItem?.alis);
+  const sell = Number(usdItem?.selling ?? usdItem?.sell ?? usdItem?.Satis ?? usdItem?.satis);
+  const rate = buy > 0 && sell > 0 ? (buy + sell) / 2 : Number(buy || sell);
+  if (!rate || Number.isNaN(rate)) throw new Error("doviz.com: نرخ USD در پاسخ پیدا نشد");
+  return rate; // ۱ دلار = rate لیر
+}
+
+// ── منبع ۲ برای نرخ دلار/لیر: Frankfurter (نرخ رسمی بانک مرکزی اروپا) ──────
+async function fetchUsdTryFromFrankfurter() {
+  const res = await fetch("https://api.frankfurter.dev/v1/latest?base=USD&symbols=TRY");
+  if (!res.ok) throw new Error(`Frankfurter پاسخ HTTP ${res.status} داد`);
+  const json = await res.json();
+  const rate = Number(json?.rates?.TRY);
+  if (!rate || Number.isNaN(rate)) throw new Error("Frankfurter: نرخ TRY در پاسخ پیدا نشد");
+  return rate;
+}
+
+// ── منبع ۱ برای نرخ دلار/ریال بازار آزاد: bonbast ──────────────────────────
+// bonbast قیمت را به «تومان» می‌دهد؛ اینجا در ۱۰ ضرب می‌کنیم تا به ریال تبدیل شود.
+async function fetchUsdIrrFromBonbast() {
+  const res = await fetch("https://bonbast.amirhn.com/latest");
+  if (!res.ok) throw new Error(`bonbast پاسخ HTTP ${res.status} داد`);
+  const json = await res.json();
+  const buyToman = Number(json?.usd1 ?? json?.usd_sell ?? json?.usd?.sell);
+  const sellToman = Number(json?.usd2 ?? json?.usd_buy ?? json?.usd?.buy);
+  const toman = buyToman > 0 && sellToman > 0 ? (buyToman + sellToman) / 2 : Number(buyToman || sellToman);
+  if (!toman || Number.isNaN(toman)) throw new Error("bonbast: نرخ usd در پاسخ پیدا نشد");
+  return toman * 10; // تومان → ریال
+}
+
+// ── منبع ۲ برای نرخ دلار/ریال بازار آزاد: brsapi (رایگان) ─────────────────
+async function fetchUsdIrrFromBrsApi() {
+  const res = await fetch("https://BrsApi.ir/FreeTsetmcBourseApi/Api_Free_Gold_Currency_v2.json");
+  if (!res.ok) throw new Error(`brsapi پاسخ HTTP ${res.status} داد`);
+  const json = await res.json();
+  const list = json?.currency || json?.Currency || [];
+  const usdItem = list.find((it) =>
+    (it?.symbol || it?.name_en || it?.Symbol || "").toString().toUpperCase().includes("USD"),
+  );
+  const toman = Number(usdItem?.price ?? usdItem?.Price);
+  if (!toman || Number.isNaN(toman)) throw new Error("brsapi: نرخ usd در پاسخ پیدا نشد");
+  return toman * 10; // تومان → ریال
+}
+
+const USD_TRY_SOURCES = [
+  { name: "doviz.com", fn: fetchUsdTryFromDovizCom },
+  { name: "Frankfurter", fn: fetchUsdTryFromFrankfurter },
+];
+const USD_IRR_SOURCES = [
+  { name: "bonbast", fn: fetchUsdIrrFromBonbast },
+  { name: "brsapi", fn: fetchUsdIrrFromBrsApi },
+];
+
+// منابع یک نرخ را به‌ترتیب امتحان می‌کند؛ به محض موفقیت اولی برمی‌گردد
+async function fetchFirstSuccessful(sources) {
+  let lastErr;
+  for (const src of sources) {
+    try {
+      const value = await src.fn();
+      return { value, source: src.name };
+    } catch (err) {
+      lastErr = err;
+      console.warn(`[نرخ ارز] منبع «${src.name}» ناموفق بود: ${err.message}`);
+    }
+  }
+  throw lastErr || new Error("همه‌ی منابع ناموفق بودند");
+}
+
+// معادل تومان/ریالِ نرخ‌های خام را محاسبه و در Firestore ذخیره می‌کند
+// (merge: true یعنی اگر یکی از دو نرخ هنوز امروز به‌روز نشده، مقدار قبلی‌اش
+// دست‌نخورده می‌ماند — دقیقاً همان رفتاری که خواسته شده بود)
+async function persistRatesToFirestore() {
+  if (!latestRates.usdToTry) return;
+  const payload = {
+    usdToTry: latestRates.usdToTry,
+    usdToTrySource: latestRates.usdToTrySource,
+    usdToTryUpdatedAt: latestRates.usdToTryUpdatedAt,
+    tryToUsd: 1 / latestRates.usdToTry,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  };
+  if (latestRates.usdToIrr) {
+    payload.usdToIrr = latestRates.usdToIrr;
+    payload.usdToIrrSource = latestRates.usdToIrrSource;
+    payload.usdToIrrUpdatedAt = latestRates.usdToIrrUpdatedAt;
+    payload.tryToRial = latestRates.usdToIrr / latestRates.usdToTry;
+  }
+  await RATES_DOC_REF.set(payload, { merge: true });
+}
+
+// یک بار تلاش برای گرفتن نرخ؛ اگر شکست بخورد هر ۳۰ دقیقه دوباره امتحان می‌کند
+async function runRateJob(jobKey, sources, applyResult, label) {
+  if (rateJobRetryTimers[jobKey]) {
+    clearTimeout(rateJobRetryTimers[jobKey]);
+    rateJobRetryTimers[jobKey] = null;
+  }
+  try {
+    const { value, source } = await fetchFirstSuccessful(sources);
+    applyResult(value, source);
+    await persistRatesToFirestore();
+    console.log(`[نرخ ارز] ${label} با موفقیت از «${source}» گرفته شد: ${value}`);
+  } catch (err) {
+    console.error(
+      `[نرخ ارز] دریافت ${label} ناموفق بود؛ تا ۳۰ دقیقه‌ی دیگر دوباره تلاش می‌شود. ` +
+        `تا آن زمان آخرین نرخ معتبر همچنان روی سایت نمایش داده می‌شود.`,
+    );
+    rateJobRetryTimers[jobKey] = setTimeout(
+      () => runRateJob(jobKey, sources, applyResult, label),
+      RATE_RETRY_INTERVAL_MS,
+    );
+  }
+}
+
+function applyUsdTryResult(value, source) {
+  latestRates.usdToTry = value;
+  latestRates.usdToTrySource = source;
+  latestRates.usdToTryUpdatedAt = new Date();
+}
+function applyUsdIrrResult(value, source) {
+  latestRates.usdToIrr = value;
+  latestRates.usdToIrrSource = source;
+  latestRates.usdToIrrUpdatedAt = new Date();
+}
+
+// محاسبه‌ی میلی‌ثانیه تا نزدیک‌ترین ساعت:دقیقه‌ی بعدی به وقت استانبول
+function msUntilNextIstanbulTime(hour, minute) {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: ISTANBUL_TZ,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(now);
+  const get = (type) => Number(parts.find((p) => p.type === type).value);
+  const istNow = new Date(
+    Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"), get("second")),
+  );
+  const target = new Date(istNow);
+  target.setUTCHours(hour, minute, 0, 0);
+  if (target <= istNow) target.setUTCDate(target.getUTCDate() + 1);
+  return target.getTime() - istNow.getTime();
+}
+
+function scheduleDailyRateJob(hour, minute, jobKey, sources, applyResult, label) {
+  const delay = msUntilNextIstanbulTime(hour, minute);
+  console.log(
+    `[نرخ ارز] زمان‌بندی ${label}: اولین اجرا تا ${Math.round(delay / 60000)} دقیقه‌ی دیگر ` +
+      `(ساعت ${hour}:${String(minute).padStart(2, "0")} به وقت استانبول)`,
+  );
+  setTimeout(function runAndReschedule() {
+    runRateJob(jobKey, sources, applyResult, label);
+    setInterval(() => runRateJob(jobKey, sources, applyResult, label), 24 * 60 * 60 * 1000);
+  }, delay);
+}
+
+// آیا این تاریخ مربوط به «امروز» به وقت استانبول است؟
+function isUpdatedToday(date) {
+  if (!date) return false;
+  const d = typeof date.toDate === "function" ? date.toDate() : new Date(date);
+  const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: ISTANBUL_TZ });
+  return fmt.format(new Date()) === fmt.format(d);
+}
+
+async function initRatesSystem() {
+  try {
+    const doc = await RATES_DOC_REF.get();
+    if (doc.exists) {
+      const data = doc.data();
+      if (data.usdToTry) {
+        latestRates.usdToTry = data.usdToTry;
+        latestRates.usdToTrySource = data.usdToTrySource || null;
+        latestRates.usdToTryUpdatedAt = data.usdToTryUpdatedAt?.toDate?.() || null;
+      }
+      if (data.usdToIrr) {
+        latestRates.usdToIrr = data.usdToIrr;
+        latestRates.usdToIrrSource = data.usdToIrrSource || null;
+        latestRates.usdToIrrUpdatedAt = data.usdToIrrUpdatedAt?.toDate?.() || null;
+      }
+    }
+  } catch (err) {
+    console.error("[نرخ ارز] خواندن نرخ ذخیره‌شده از Firestore ناموفق بود:", err.message);
+  }
+
+  // اگر سرور همین امروز ری‌استارت شده و نرخ امروز هنوز گرفته نشده، یک تلاش فوری بزن
+  if (!isUpdatedToday(latestRates.usdToTryUpdatedAt)) {
+    runRateJob("usdTry", USD_TRY_SOURCES, applyUsdTryResult, "نرخ دلار/لیر");
+  }
+  if (!isUpdatedToday(latestRates.usdToIrrUpdatedAt)) {
+    runRateJob("usdIrr", USD_IRR_SOURCES, applyUsdIrrResult, "نرخ دلار/ریال بازار آزاد");
+  }
+
+  scheduleDailyRateJob(13, 0, "usdTry", USD_TRY_SOURCES, applyUsdTryResult, "نرخ دلار/لیر");
+  scheduleDailyRateJob(15, 0, "usdIrr", USD_IRR_SOURCES, applyUsdIrrResult, "نرخ دلار/ریال بازار آزاد");
+}
+
+initRatesSystem();
+// ══════════════════════════════════════════════════════════════════════════
+
 // ── کلید خصوصی ───────────────────────────────────────────────────────────
 const privateKey = process.env.PRIVATE_KEY.replace(/\\n/g, "\n");
 
@@ -1712,6 +1964,33 @@ app.delete("/admin/discount/:code", async (req, res) => {
       .status(401)
       .json({ status: "error", error: "دسترسی نامعتبر یا خطای سرور" });
   }
+});
+
+// ── نرخ ارز فعلی (فقط برای دیباگ/مانیتورینگ — کلاینت مستقیماً از Firestore
+// می‌خواند، پس نیازی به این مسیر برای نمایش روی سایت نیست) ─────────────────
+app.get("/rates/latest", (req, res) => {
+  res.json({
+    usdToTry: latestRates.usdToTry,
+    usdToTrySource: latestRates.usdToTrySource,
+    usdToTryUpdatedAt: latestRates.usdToTryUpdatedAt,
+    usdToIrr: latestRates.usdToIrr,
+    usdToIrrSource: latestRates.usdToIrrSource,
+    usdToIrrUpdatedAt: latestRates.usdToIrrUpdatedAt,
+    tryToUsd: latestRates.usdToTry ? 1 / latestRates.usdToTry : null,
+    tryToRial:
+      latestRates.usdToTry && latestRates.usdToIrr
+        ? latestRates.usdToIrr / latestRates.usdToTry
+        : null,
+  });
+});
+
+// ── واداشتن سرور به گرفتن فوری نرخ‌ها (فقط ادمین) — برای تست ─────────────
+app.post("/admin/refresh-rates", requireAdmin, async (req, res) => {
+  await Promise.all([
+    runRateJob("usdTry", USD_TRY_SOURCES, applyUsdTryResult, "نرخ دلار/لیر"),
+    runRateJob("usdIrr", USD_IRR_SOURCES, applyUsdIrrResult, "نرخ دلار/ریال بازار آزاد"),
+  ]);
+  res.json({ status: "ok", rates: latestRates });
 });
 
 // ── health check ──────────────────────────────────────────────────────────
