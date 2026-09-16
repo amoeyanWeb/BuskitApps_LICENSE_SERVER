@@ -161,15 +161,17 @@ async function runRateJob(jobKey, sources, applyResult, label) {
     applyResult(value, source);
     await persistRatesToFirestore();
     console.log(`[نرخ ارز] ${label} با موفقیت از «${source}» گرفته شد: ${value}`);
+    return { success: true, value, source };
   } catch (err) {
     console.error(
-      `[نرخ ارز] دریافت ${label} ناموفق بود؛ تا ۳۰ دقیقه‌ی دیگر دوباره تلاش می‌شود. ` +
+      `[نرخ ارز] دریافت ${label} ناموفق بود: ${err.message}؛ تا ۳۰ دقیقه‌ی دیگر دوباره تلاش می‌شود. ` +
         `تا آن زمان آخرین نرخ معتبر همچنان روی سایت نمایش داده می‌شود.`,
     );
     rateJobRetryTimers[jobKey] = setTimeout(
       () => runRateJob(jobKey, sources, applyResult, label),
       RATE_RETRY_INTERVAL_MS,
     );
+    return { success: false, error: err.message };
   }
 }
 
@@ -1986,11 +1988,21 @@ app.get("/rates/latest", (req, res) => {
 
 // ── واداشتن سرور به گرفتن فوری نرخ‌ها (فقط ادمین) — برای تست ─────────────
 app.post("/admin/refresh-rates", requireAdmin, async (req, res) => {
-  await Promise.all([
+  const [usdTry, usdIrr] = await Promise.all([
     runRateJob("usdTry", USD_TRY_SOURCES, applyUsdTryResult, "نرخ دلار/لیر"),
     runRateJob("usdIrr", USD_IRR_SOURCES, applyUsdIrrResult, "نرخ دلار/ریال بازار آزاد"),
   ]);
-  res.json({ status: "ok", rates: latestRates });
+
+  const allFailed = !usdTry.success && !usdIrr.success;
+  res.status(allFailed ? 502 : 200).json({
+    status: allFailed ? "error" : "ok",
+    error: allFailed
+      ? "هیچ‌کدام از منبع‌های نرخ در دسترس نبودند — جزئیات را در لاگ سرور ببین."
+      : undefined,
+    usdTry,
+    usdIrr,
+    rates: latestRates,
+  });
 });
 
 // ── health check ──────────────────────────────────────────────────────────
