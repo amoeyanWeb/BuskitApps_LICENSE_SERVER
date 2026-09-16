@@ -67,13 +67,22 @@ app.use((req, res, next) => {
 // "5days" رو نگه داشتیم چون مال کد رایگان Free Trial (is_shared) هست که
 // یک قابلیت جداست، نه یکی از سطح‌های خرید، و توی ActivationActivity هنوز
 // استفاده می‌شه.
+// "probation": لایسنس اختصاصی (is_shared=false) که قبل از دریافت پول به
+// مشتری داده می‌شه — فقط ۲ روز مهلت داره تا پول رو واریز کنه. اگه پرداخت
+// کرد، ادمین دستی expires_at همون سند رو توی Firestore به تاریخ دلخواه
+// (مثلاً ۲۰ سال بعد) تغییر می‌ده. اگه پرداخت نکرد، بعد از ۲ روز خودکار
+// منقضی می‌شه. سقف «هر دستگاه فقط یک‌بار probation» با فیلد
+// hadProbationLicense روی سند devices/{fingerprint__appId} تضمین می‌شه
+// (پایین‌تر در /activate) تا کسی نتونه با گرفتن پی‌درپی کدهای probation
+// جدید، یک تریال نامحدود رایگان برای خودش بسازه.
 const LICENSE_DURATIONS = {
   lifetime: null,
   "5days": 5 * 24 * 60 * 60 * 1000,
+  probation: 2 * 24 * 60 * 60 * 1000,
 };
 
-// ترتیب اولویت چک در زمان ساین‌این: مادام‌العمر > رایگان (تریال)
-const DURATION_ORDER = ["lifetime", "5days"];
+// ترتیب اولویت چک در زمان ساین‌این: مادام‌العمر > رایگان (تریال) > probation
+const DURATION_ORDER = ["lifetime", "5days", "probation"];
 
 // ── appId های مجاز ────────────────────────────────────────────────────────
 // لیست application id های سه اپ. اگه appId ارسالی توی این لیست نباشه
@@ -349,6 +358,290 @@ async function sendLicenseEmail(email, name, licenseCode) {
 
   await brevoEmailApi.sendTransacEmail(sendSmtpEmail);
 }
+
+// ════════════════════════════════════════════════════════════════════════
+//  📧 ایمیل تحویل لایسنس probation (۲ روزه، پیش از دریافت وجه)
+// ════════════════════════════════════════════════════════════════════════
+// این ایمیل بلافاصله بعد از زدن دکمه «ثبت و دریافت لایسنس» در سایت برای
+// مشتری فرستاده می‌شود: کد لایسنس را همان لحظه تحویل می‌دهد و هم‌زمان
+// یادآوری می‌کند که ظرف ۲ روز باید وجه را واریز کند، وگرنه سیستم خودش
+// لایسنس را غیرفعال می‌کند (چون license_type = "probation" است و
+// expires_at آن دو روز بعد از فعال‌سازی ست می‌شود).
+// متن بر اساس زبانِ انتخاب‌شده در سایت (fa / en / tr / de) فرستاده می‌شود.
+
+const PROBATION_PRICE_USD = 50;
+
+// اطلاعات حساب‌ها یک‌جا نگه داشته می‌شود تا در هر چهار زبان یکسان باشد و
+// اگر روزی عوض شد فقط همین‌جا ویرایش شود.
+const PAYMENT_ACCOUNTS = {
+  iranCard: "6104-3373-3362-3831",
+  iranBank: "Bank Mellat",
+  iranOwnerFa: "محمدرضا عموئیان",
+  iranOwnerEn: "MohammadReza Amoeyan",
+  trIban: "TR10 0001 0008 3596 2786 0050 01",
+  trBank: "Ziraat Bank",
+  trOwner: "MohammadReza Amoeyan",
+  contactEmail: "BuskitApps@gmail.com",
+  whatsapp: "00905312691609",
+};
+
+function buildAccountsBlock(lang) {
+  const t = {
+    fa: {
+      heading: "حساب‌های بانکی جهت واریز وجه:",
+      iran: "کارت بانکی ایران (بانک ملت):",
+      owner: "به نام:",
+      tr: "حساب لیر ترکیه (Ziraat Bank):",
+    },
+    en: {
+      heading: "Bank accounts for payment:",
+      iran: "Iranian bank card (Bank Mellat):",
+      owner: "Account holder:",
+      tr: "Turkish Lira account (Ziraat Bank):",
+    },
+    tr: {
+      heading: "Ödeme için banka hesapları:",
+      iran: "İran banka kartı (Bank Mellat):",
+      owner: "Hesap sahibi:",
+      tr: "Türk Lirası hesabı (Ziraat Bank):",
+    },
+    de: {
+      heading: "Bankkonten für die Zahlung:",
+      iran: "Iranische Bankkarte (Bank Mellat):",
+      owner: "Kontoinhaber:",
+      tr: "Türkische-Lira-Konto (Ziraat Bank):",
+    },
+  }[lang] || null;
+  const L = t || {
+    heading: "Bank accounts for payment:",
+    iran: "Iranian bank card (Bank Mellat):",
+    owner: "Account holder:",
+    tr: "Turkish Lira account (Ziraat Bank):",
+  };
+  const owner =
+    lang === "fa" ? PAYMENT_ACCOUNTS.iranOwnerFa : PAYMENT_ACCOUNTS.iranOwnerEn;
+  return `
+    <div style="border:1px solid #d0d7e2; border-radius:6px; padding:12px; margin:14px 0;">
+      <p style="font-weight:bold; margin:0 0 8px 0;">${L.heading}</p>
+      <p style="margin:0 0 4px 0;">${L.iran}</p>
+      <p dir="ltr" style="font-family:monospace; font-size:15px; margin:0 0 2px 0; text-align:left;">${PAYMENT_ACCOUNTS.iranCard}</p>
+      <p style="margin:0 0 10px 0; font-size:12px; color:#555;">${L.owner} ${owner}</p>
+      <p style="margin:0 0 4px 0;">${L.tr}</p>
+      <p dir="ltr" style="font-family:monospace; font-size:15px; margin:0 0 2px 0; text-align:left;">${PAYMENT_ACCOUNTS.trIban}</p>
+      <p style="margin:0; font-size:12px; color:#555;">${L.owner} ${PAYMENT_ACCOUNTS.trOwner}</p>
+    </div>
+  `;
+}
+
+function buildProbationEmail(lang, name, licenseCode) {
+  const code = `<h2 style="letter-spacing:3px; font-family:monospace; direction:ltr; text-align:center; background:#f2f4f8; padding:10px; border-radius:6px;">${licenseCode}</h2>`;
+  const price = PROBATION_PRICE_USD;
+  const mail = PAYMENT_ACCOUNTS.contactEmail;
+  const wa = PAYMENT_ACCOUNTS.whatsapp;
+
+  if (lang === "fa") {
+    return {
+      subject: "لایسنس اپلیکیشن BuskitTools شما",
+      html: `
+      <div dir="rtl" style="font-family: Tahoma, Arial, sans-serif; text-align:right; line-height:1.9;">
+        <p>هنرمند گرامی، سلام</p>
+        <p>بدین وسیله لایسنس شما به شماره‌ی زیر برای اپلیکیشن <b>BuskitTools</b> تقدیم می‌گردد:</p>
+        ${code}
+        <p>امیدواریم تا اجراهایی با کیفیت و شنیدنی با استفاده از این اپلیکیشن داشته باشید. بسیار خوشحال خواهیم شد تا پیشنهادات یا نظرات خود را در خصوص این اپلیکیشن از طریق همین آدرس ایمیل اعلام فرمایید.</p>
+        <p>ضمناً خواهشمند است ظرف مدت <b>۲ روز</b> وجه این لایسنس را (<b>${price} دلار</b>) به یکی از حساب‌های زیر واریز و سند واریزی را از طریق همین ایمیل ارسال دارید؛ متأسفانه در غیر این صورت سیستم بعد از ۲ روز این لایسنس را غیرفعال خواهد کرد.</p>
+        ${buildAccountsBlock("fa")}
+        <p>در صورت وجود هرگونه ابهام، از طریق واتس‌آپ ${wa} یا همین ایمیل (${mail}) با ما در تماس باشید.</p>
+        <p>به امید شادی و سلامت</p>
+      </div>`,
+    };
+  }
+
+  if (lang === "tr") {
+    return {
+      subject: "BuskitTools uygulaması lisansınız",
+      html: `
+      <div dir="ltr" style="font-family: Tahoma, Arial, sans-serif; text-align:left; line-height:1.8;">
+        <p>Değerli sanatçı, merhaba${name ? " " + name : ""},</p>
+        <p><b>BuskitTools</b> uygulaması için lisansınızı aşağıda sunuyoruz:</p>
+        ${code}
+        <p>Bu uygulamayı kullanarak kaliteli ve keyifli performanslar gerçekleştirmenizi diliyoruz. Uygulamayla ilgili öneri ve görüşlerinizi bu e-posta adresi üzerinden bizimle paylaşırsanız çok memnun oluruz.</p>
+        <p>Ayrıca lisans bedelini (<b>${price} USD</b>) <b>2 gün</b> içinde aşağıdaki hesaplardan birine yatırmanızı ve dekontu yine bu e-posta adresine göndermenizi rica ederiz. Aksi hâlde sistem 2 gün sonra bu lisansı otomatik olarak devre dışı bırakacaktır.</p>
+        ${buildAccountsBlock("tr")}
+        <p>Herhangi bir sorunuz olursa WhatsApp ${wa} numarasından veya ${mail} adresinden bize ulaşabilirsiniz.</p>
+        <p>Sağlık ve mutluluk dileğiyle.</p>
+      </div>`,
+    };
+  }
+
+  if (lang === "de") {
+    return {
+      subject: "Ihre Lizenz für die BuskitTools-App",
+      html: `
+      <div dir="ltr" style="font-family: Tahoma, Arial, sans-serif; text-align:left; line-height:1.8;">
+        <p>Sehr geehrte Künstlerin, sehr geehrter Künstler${name ? " " + name : ""},</p>
+        <p>hiermit überreichen wir Ihnen Ihre Lizenz für die App <b>BuskitTools</b>:</p>
+        ${code}
+        <p>Wir hoffen, dass Sie mit dieser App hochwertige und mitreißende Auftritte gestalten. Über Ihre Anregungen oder Rückmeldungen zur App an diese E-Mail-Adresse freuen wir uns sehr.</p>
+        <p>Bitte überweisen Sie den Lizenzbetrag (<b>${price} USD</b>) innerhalb von <b>2 Tagen</b> auf eines der unten genannten Konten und senden Sie den Zahlungsbeleg an diese E-Mail-Adresse. Andernfalls wird das System diese Lizenz nach 2 Tagen leider automatisch deaktivieren.</p>
+        ${buildAccountsBlock("de")}
+        <p>Bei Fragen erreichen Sie uns über WhatsApp ${wa} oder unter ${mail}.</p>
+        <p>Mit den besten Wünschen für Gesundheit und Freude.</p>
+      </div>`,
+    };
+  }
+
+  return {
+    subject: "Your BuskitTools app license",
+    html: `
+      <div dir="ltr" style="font-family: Tahoma, Arial, sans-serif; text-align:left; line-height:1.8;">
+        <p>Dear artist${name ? " " + name : ""}, hello,</p>
+        <p>We are pleased to present your license for the <b>BuskitTools</b> app:</p>
+        ${code}
+        <p>We hope you create high-quality and memorable performances with this application. We would be very glad to hear your suggestions or feedback about the app at this same email address.</p>
+        <p>Please also transfer the license fee (<b>${price} USD</b>) within <b>2 days</b> to one of the accounts below and send the payment receipt to this same email address. Otherwise, the system will unfortunately deactivate this license after 2 days.</p>
+        ${buildAccountsBlock("en")}
+        <p>If anything is unclear, contact us via WhatsApp ${wa} or at ${mail}.</p>
+        <p>Wishing you health and happiness.</p>
+      </div>`,
+  };
+}
+
+async function sendProbationLicenseEmail(email, name, licenseCode, lang) {
+  const { subject, html } = buildProbationEmail(lang, name, licenseCode);
+  const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+  sendSmtpEmail.sender = {
+    name: "Buskit",
+    // باید همان آدرسی باشد که در Brevo verify شده؛ اگر BuskitApps@gmail.com
+    // را آنجا به‌عنوان sender تایید کرده‌اید، همین مقدار را در متغیر محیطی
+    // BREVO_SENDER_EMAIL بگذارید.
+    email: process.env.BREVO_SENDER_EMAIL || PAYMENT_ACCOUNTS.contactEmail,
+  };
+  // پاسخ مشتری (ارسال سند واریزی) همیشه به آدرس اصلی برگردد
+  sendSmtpEmail.replyTo = { email: PAYMENT_ACCOUNTS.contactEmail, name: "Buskit" };
+  sendSmtpEmail.to = [{ email, name: name || undefined }];
+  sendSmtpEmail.subject = subject;
+  sendSmtpEmail.htmlContent = html;
+  await brevoEmailApi.sendTransacEmail(sendSmtpEmail);
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  🎫 صدور فوری لایسنس probation از فرم سایت («ثبت و دریافت لایسنس»)
+// ════════════════════════════════════════════════════════════════════════
+// جریان کار:
+//   ۱) نام/ایمیل/واتس‌اپ را از فرم سایت می‌گیرد.
+//   ۲) چک می‌کند که همین ایمیل قبلاً یک لایسنس probation نگرفته باشد (تا
+//      کسی با زدنِ پی‌درپی دکمه، ده‌ها کد رایگان نسازد). سقف اصلی و
+//      غیرقابل‌دورزدن همچنان در /activate است (hadProbationLicense روی سند
+//      دستگاه) — این‌جا فقط جلوی ساختِ سندهای زائد را می‌گیریم.
+//   ۳) یک سند در licenses با license_type:"probation" می‌سازد.
+//   ۴) کد را فوراً با ایمیل (به زبان انتخاب‌شده در سایت) می‌فرستد.
+//   ۵) یک سند در licenseRequests هم برای پنل ادمین ثبت می‌کند.
+// نکته: expires_at این‌جا ست نمی‌شود؛ شمارش ۲ روز از لحظه‌ی فعال‌سازی روی
+// گوشی در /activate شروع می‌شود (LICENSE_DURATIONS.probation).
+app.post("/request-probation-license", async (req, res) => {
+  try {
+    const { name, email, whatsapp, lang } = req.body || {};
+
+    const cleanName = typeof name === "string" ? name.trim() : "";
+    const cleanEmail =
+      typeof email === "string" ? email.trim().toLowerCase() : "";
+    const cleanWhatsapp = typeof whatsapp === "string" ? whatsapp.trim() : "";
+    const safeLang = ["fa", "en", "tr", "de"].includes(lang) ? lang : "en";
+
+    if (!cleanName || !cleanEmail || !/^\S+@\S+\.\S+$/.test(cleanEmail)) {
+      return res
+        .status(400)
+        .json({ success: false, error: "invalid-input" });
+    }
+
+    // ── یک ایمیل = یک لایسنس probation ──────────────────────────────────
+    const dup = await db
+      .collection("licenses")
+      .where("email", "==", cleanEmail)
+      .where("license_type", "==", "probation")
+      .limit(1)
+      .get();
+    if (!dup.empty) {
+      return res
+        .status(409)
+        .json({ success: false, error: "already-issued" });
+    }
+
+    const licenseCode = generateLicenseCode();
+    await db
+      .collection("licenses")
+      .doc(licenseCode)
+      .set({
+        tier: "gold",
+        license_type: "probation",
+        appGeneration: CURRENT_APP_GENERATION,
+        is_shared: false,
+        is_used: false,
+        // فلگ درخواستیِ شما روی خود سند لایسنس. توجه: گیتِ واقعیِ «هر دستگاه
+        // فقط یک probation» در /activate روی سند devices/{fingerprint__appId}
+        // نوشته می‌شود؛ این فیلد صرفاً برای گزارش‌گیری در پنل ادمین است.
+        hadProbationLicense: true,
+        name: cleanName,
+        email: cleanEmail,
+        whatsapp: cleanWhatsapp,
+        lang: safeLang,
+        priceUsd: PROBATION_PRICE_USD,
+        paid: false, // بعد از دریافت سند واریزی، دستی true کنید
+        source: "website-probation",
+        delivered: false, // پایین‌تر، بعد از ارسال موفق ایمیل، true می‌شود
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+    let emailSent = true;
+    try {
+      await sendProbationLicenseEmail(
+        cleanEmail,
+        cleanName,
+        licenseCode,
+        safeLang,
+      );
+      await db
+        .collection("licenses")
+        .doc(licenseCode)
+        .update({
+          delivered: true,
+          deliveredAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+    } catch (mailErr) {
+      emailSent = false;
+      console.error("خطا در ارسال ایمیل لایسنس probation:", mailErr);
+    }
+
+    // ثبت درخواست برای پنل ادمین (همان کالکشنی که قبلاً سایت خودش می‌نوشت)
+    try {
+      await db.collection("licenseRequests").add({
+        name: cleanName,
+        email: cleanEmail,
+        whatsapp: cleanWhatsapp,
+        lang: safeLang,
+        licenseCode,
+        license_type: "probation",
+        license_sent: emailSent,
+        paid: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    } catch (reqErr) {
+      console.error("خطا در ثبت licenseRequests:", reqErr);
+    }
+
+    // اگر ایمیل نرفت، به کاربر می‌گوییم که با پشتیبانی تماس بگیرد — کد
+    // لایسنس را عمداً در پاسخ HTTP برنمی‌گردانیم تا فقط از راه ایمیل
+    // تحویل داده شود.
+    if (!emailSent) {
+      return res.status(502).json({ success: false, error: "email-failed" });
+    }
+
+    return res.status(200).json({ success: true });
+  } catch (err) {
+    console.error("خطا در request-probation-license:", err);
+    return res.status(500).json({ success: false, error: "server-error" });
+  }
+});
 
 // ── بررسی سریع و فقط-خواندنیِ یک کد تخفیف (پیش‌نمایش درصد/مبلغ تخفیف در فرم
 //    خرید سایت) — این مسیر چیزی رو مصرف/تغییر نمی‌دهد، فقط گزارش می‌کند.
@@ -823,6 +1116,10 @@ app.post("/activate", async (req, res) => {
     // همین سند بنویسند، Firestore یکی را با موفقیت انجام می‌دهد و
     // دیگری را با داده‌ی تازه (is_used=true) دوباره اجرا می‌کند، پس
     // فقط یکی برنده می‌شود.
+    // probation فقط یک‌بار در سطح دستگاه مجازه — سند ایندکس دستگاه رو
+    // از قبل می‌گیریم تا داخل تراکنش هم بخونیمش هم (در صورت لزوم) بنویسیمش.
+    const deviceRef = db.collection("devices").doc(safeId);
+
     let txResult;
     try {
       txResult = await db.runTransaction(async (tx) => {
@@ -848,6 +1145,18 @@ app.post("/activate", async (req, res) => {
           });
         }
 
+        // ── سقف probation: این دستگاه قبلاً یک کد probation دیگه (هرچی
+        // بوده، پرداخت‌شده یا نشده) گرفته؟ اگه آره، رد کن — وگرنه می‌شه با
+        // گرفتن پی‌درپی کدهای probation جدید، یک تریال نامحدود ساخت.
+        if (licenseType === "probation") {
+          const deviceDoc = await tx.get(deviceRef);
+          if (deviceDoc.exists && deviceDoc.data().hadProbationLicense) {
+            throw Object.assign(new Error("probation-used"), {
+              isActivateErr: true,
+            });
+          }
+        }
+
         // اولین فعال‌سازی لایسنس اختصاصی
         const now = Date.now();
         const expiresAt = durationMs !== null ? now + durationMs : null;
@@ -865,6 +1174,14 @@ app.post("/activate", async (req, res) => {
           expires_at: expiresAtFirestore,
         });
 
+        // این دستگاه از سهمیه‌ی probation‌اش استفاده کرد — این فلگ برای
+        // همیشه true می‌مونه (حتی بعد از پرداخت/تمدید دستی expires_at)،
+        // چون مربوط به «آیا این دستگاه probation گرفته» است، نه به
+        // وضعیت فعلی این کد خاص.
+        if (licenseType === "probation") {
+          tx.set(deviceRef, { hadProbationLicense: true }, { merge: true });
+        }
+
         return { expiresAt };
       });
     } catch (err) {
@@ -874,6 +1191,11 @@ app.post("/activate", async (req, res) => {
         }
         if (err.message === "expired") {
           return res.status(403).json({ error: "Your license has expired" });
+        }
+        if (err.message === "probation-used") {
+          return res.status(403).json({
+            error: "This device has already used its one-time trial license.",
+          });
         }
         return res.status(403).json({
           error: "This license code is already activated on another device",
