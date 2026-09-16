@@ -50,7 +50,69 @@ const latestRates = {
 };
 const rateJobRetryTimers = { usdTry: null, usdIrr: null };
 
-// ── منبع ۱ برای نرخ دلار/لیر: doviz.com ────────────────────────────────────
+// ── منبع ۱ برای نرخ دلار/لیر و منبع ۱ برای نرخ دلار/ریال: yekrial.com ──────
+// یک‌ریال (yekrial.com) هر دو قیمت دلار و لیر رو (به تومان) توی همون صفحه‌ی
+// اصلی نشون می‌ده. صفحه رو یک‌بار می‌خونیم، هر دو عدد رو از همون یک صفحه
+// استخراج می‌کنیم و کش می‌کنیم (۶۰ ثانیه) — طوری که وقتی هر دو job (لیر و
+// ریال) هم‌زمان (مثلاً از دکمه‌ی «بروزرسانی لحظه‌ای») اجرا می‌شن، هر دو از
+// روی دقیقاً همون یک قرائت حساب می‌شن، نه دو فچ جدا در دو لحظه‌ی متفاوت.
+// دلار→ریال مستقیم از قیمت دلار (×۱۰ برای تبدیل تومان به ریال) به دست
+// می‌آد؛ دلار→لیر از تقسیم قیمت دلار بر قیمت لیر (هر دو به تومان) محاسبه
+// می‌شه — چون هر دو به تومانن، ضرب در ۱۰ در تقسیم ساده می‌شه.
+let yekrialCache = { at: 0, data: null };
+const YEKRIAL_CACHE_TTL_MS = 60 * 1000; // ۶۰ ثانیه
+
+// به‌جای وابستگی به متن دقیق و کلاس‌های CSS صفحه (که با هر ریدیزاین سایت
+// می‌شکنه)، دنبال لینک پایدار toman-rate/{code} می‌گردیم و اولین عدد+«تومان»
+// که تا ۴۰۰ کاراکتر بعدش می‌آد رو به‌عنوان قیمت برمی‌داریم.
+function extractYekrialTomanPrice(html, code) {
+  const re = new RegExp(
+    `toman-rate/${code}["'/][\\s\\S]{0,300}?قیمت فعلی(?:<[^>]+>|\\s|&nbsp;|\\u00A0)*` +
+      `([\\d,]{3,9})(?:<[^>]+>|\\s|&nbsp;|\\u00A0)*تومان`,
+    "i",
+  );
+  const m = html.match(re);
+  if (!m) return null;
+  const value = Number(m[1].replace(/,/g, ""));
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+async function fetchRatesFromYekrial() {
+  const now = Date.now();
+  if (yekrialCache.data && now - yekrialCache.at < YEKRIAL_CACHE_TTL_MS) {
+    return yekrialCache.data;
+  }
+
+  const res = await fetch("https://yekrial.com/", {
+    headers: { "User-Agent": "Mozilla/5.0 (compatible; BuskitRateBot/1.0)" },
+  });
+  if (!res.ok) throw new Error(`yekrial.com پاسخ HTTP ${res.status} داد`);
+  const html = await res.text();
+
+  const usdToman = extractYekrialTomanPrice(html, "USD");
+  const tryToman = extractYekrialTomanPrice(html, "TRY");
+  if (!usdToman || !tryToman) {
+    throw new Error("yekrial.com: قیمت دلار یا لیر در صفحه پیدا نشد (شاید ساختار صفحه تغییر کرده)");
+  }
+
+  const data = {
+    usdToIrr: usdToman * 10, // تومان → ریال
+    usdToTry: usdToman / tryToman, // ۱ دلار = چند لیر
+  };
+  yekrialCache = { at: now, data };
+  return data;
+}
+
+async function fetchUsdTryFromYekrial() {
+  const { usdToTry } = await fetchRatesFromYekrial();
+  return usdToTry;
+}
+async function fetchUsdIrrFromYekrial() {
+  const { usdToIrr } = await fetchRatesFromYekrial();
+  return usdToIrr;
+}
+
+// ── منبع ۲ برای نرخ دلار/لیر: doviz.com ────────────────────────────────────
 async function fetchUsdTryFromDovizCom() {
   const res = await fetch("https://www.doviz.com/api/v1/currencies/all/latest", {
     headers: { "User-Agent": "Mozilla/5.0 (compatible; BuskitRateBot/1.0)" },
@@ -68,7 +130,7 @@ async function fetchUsdTryFromDovizCom() {
   return rate; // ۱ دلار = rate لیر
 }
 
-// ── منبع ۲ برای نرخ دلار/لیر: Frankfurter (نرخ رسمی بانک مرکزی اروپا) ──────
+// ── منبع ۳ برای نرخ دلار/لیر: Frankfurter (نرخ رسمی بانک مرکزی اروپا) ──────
 async function fetchUsdTryFromFrankfurter() {
   const res = await fetch("https://api.frankfurter.dev/v1/latest?base=USD&symbols=TRY");
   if (!res.ok) throw new Error(`Frankfurter پاسخ HTTP ${res.status} داد`);
@@ -78,7 +140,7 @@ async function fetchUsdTryFromFrankfurter() {
   return rate;
 }
 
-// ── منبع ۱ برای نرخ دلار/ریال بازار آزاد: bonbast ──────────────────────────
+// ── منبع ۲ برای نرخ دلار/ریال بازار آزاد: bonbast ──────────────────────────
 // bonbast قیمت را به «تومان» می‌دهد؛ اینجا در ۱۰ ضرب می‌کنیم تا به ریال تبدیل شود.
 async function fetchUsdIrrFromBonbast() {
   const res = await fetch("https://bonbast.amirhn.com/latest");
@@ -91,7 +153,7 @@ async function fetchUsdIrrFromBonbast() {
   return toman * 10; // تومان → ریال
 }
 
-// ── منبع ۲ برای نرخ دلار/ریال بازار آزاد: brsapi (رایگان) ─────────────────
+// ── منبع ۳ برای نرخ دلار/ریال بازار آزاد: brsapi (رایگان) ─────────────────
 async function fetchUsdIrrFromBrsApi() {
   const res = await fetch("https://BrsApi.ir/FreeTsetmcBourseApi/Api_Free_Gold_Currency_v2.json");
   if (!res.ok) throw new Error(`brsapi پاسخ HTTP ${res.status} داد`);
@@ -106,10 +168,12 @@ async function fetchUsdIrrFromBrsApi() {
 }
 
 const USD_TRY_SOURCES = [
+  { name: "yekrial.com", fn: fetchUsdTryFromYekrial },
   { name: "doviz.com", fn: fetchUsdTryFromDovizCom },
   { name: "Frankfurter", fn: fetchUsdTryFromFrankfurter },
 ];
 const USD_IRR_SOURCES = [
+  { name: "yekrial.com", fn: fetchUsdIrrFromYekrial },
   { name: "bonbast", fn: fetchUsdIrrFromBonbast },
   { name: "brsapi", fn: fetchUsdIrrFromBrsApi },
 ];
