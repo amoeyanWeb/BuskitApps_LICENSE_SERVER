@@ -10,6 +10,21 @@ const serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT);
 admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 const db = admin.firestore();
 
+// ── اتصال دوم: پروژه‌ی buskitlivefxsite ─────────────────────────────────────
+// سایت اصلی (index.html/script.js) و بخش نمایش نرخ در پنل ادمین، هر دو از
+// اپ پیش‌فرض Firebase با projectId «buskitlivefxsite» می‌خونن — که کاملاً از
+// پروژه‌ی livefx-b43d5 (بالا) جداست. برای همین سند rates/latest باید توی
+// همین پروژه‌ی دوم نوشته بشه، نه توی livefx-b43d5؛ در غیر این صورت سرور
+// موفق می‌نویسه ولی جایی که کسی نمی‌بینتش. بقیه‌ی مسیرها (license, discount
+// code, appVersions و...) دست‌نخورده از همون اتصال اول (db/livefx-b43d5)
+// استفاده می‌کنن، چون admin.html هم دقیقاً همونجا می‌خونتشون (dbLiveFX).
+const buskitSiteServiceAccount = JSON.parse(process.env.SERVICE_ACCOUNT_BUSKITSITE);
+const buskitSiteApp = admin.initializeApp(
+  { credential: admin.credential.cert(buskitSiteServiceAccount) },
+  "buskitSite",
+);
+const buskitSiteDb = buskitSiteApp.firestore();
+
 // ══════════════════════════════════════════════════════════════════════════
 // ── نرخ ارز (دلار/لیر و دلار/ریال بازار آزاد) ───────────────────────────────
 // این بخش دو نرخ را خودکار و روزانه می‌گیرد و در سند Firestore به آدرس
@@ -35,7 +50,7 @@ const db = admin.firestore();
 // fetchUsdTryFromDovizCom) فقط URL و نگاشت فیلدها را عوض کنی؛ بقیه‌ی سیستم
 // (زمان‌بندی، تلاش مجدد، کش، ذخیره در Firestore) دست‌نخورده کار می‌کند.
 // ══════════════════════════════════════════════════════════════════════════
-const RATES_DOC_REF = db.collection("rates").doc("latest");
+const RATES_DOC_REF = buskitSiteDb.collection("rates").doc("latest");
 const ISTANBUL_TZ = "Europe/Istanbul";
 const RATE_RETRY_INTERVAL_MS = 30 * 60 * 1000; // نیم ساعت
 
