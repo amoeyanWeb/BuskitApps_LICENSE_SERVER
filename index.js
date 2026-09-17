@@ -62,16 +62,24 @@ const rateJobRetryTimers = { usdTry: null, usdIrr: null };
 let yekrialCache = { at: 0, data: null };
 const YEKRIAL_CACHE_TTL_MS = 60 * 1000; // ۶۰ ثانیه
 
-// به‌جای وابستگی به متن دقیق و کلاس‌های CSS صفحه (که با هر ریدیزاین سایت
-// می‌شکنه)، دنبال لینک پایدار toman-rate/{code} می‌گردیم و اولین عدد+«تومان»
-// که تا ۴۰۰ کاراکتر بعدش می‌آد رو به‌عنوان قیمت برمی‌داریم.
-function extractYekrialTomanPrice(html, code) {
-  const re = new RegExp(
-    `toman-rate/${code}["'/][\\s\\S]{0,300}?قیمت فعلی(?:<[^>]+>|\\s|&nbsp;|\\u00A0)*` +
-      `([\\d,]{3,9})(?:<[^>]+>|\\s|&nbsp;|\\u00A0)*تومان`,
-    "i",
-  );
-  const m = html.match(re);
+// یک‌ریال صفحه‌ی هر ارز رو ریدیزاین کرده: برچسب «قیمت فعلی» که قبلاً ازش
+// استفاده می‌کردیم دیگه روی سایت وجود نداره؛ الان هر ارز صفحه‌ی اختصاصی خودش
+// (yekrial.com/toman-rate/{code}) رو داره و نرخ بازار آزاد زیر برچسب
+// «نرخ لحظه‌ای» می‌آد (نمونه‌ی واقعیِ صفحه: «نرخ لحظه‌ای ۲۳۰٬۶۰۰ تومان»).
+// برای مقاوم بودن در برابر ریدیزاین‌های بعدی، به‌جای رجکس روی HTML خام، اول
+// همه‌ی تگ‌ها رو حذف می‌کنیم و متن ساده رو می‌گردیم — این‌جوری تغییر کلاس‌های
+// CSS یا چیدمان تگ‌ها دیگه چیزی رو نمی‌شکنه، فقط اگر خودِ برچسب «نرخ لحظه‌ای»
+// عوض بشه لازمه این تابع دوباره آپدیت شه.
+function extractYekrialLiveTomanPrice(html) {
+  const plainText = html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/\u200c/g, "") // نیم‌فاصله‌ی «لحظه‌ای» رو حذف می‌کنیم تا با متن هدف یکی بشه
+    .replace(/\s+/g, " ");
+
+  const m = plainText.match(/نرخ لحظهای\s*([\d,]{3,9})\s*تومان/);
   if (!m) return null;
   const value = Number(m[1].replace(/,/g, ""));
   return Number.isFinite(value) && value > 0 ? value : null;
@@ -83,16 +91,19 @@ async function fetchRatesFromYekrial() {
     return yekrialCache.data;
   }
 
-  const res = await fetch("https://yekrial.com/", {
-    headers: { "User-Agent": "Mozilla/5.0 (compatible; BuskitRateBot/1.0)" },
-  });
-  if (!res.ok) throw new Error(`yekrial.com پاسخ HTTP ${res.status} داد`);
-  const html = await res.text();
+  const headers = { "User-Agent": "Mozilla/5.0 (compatible; BuskitRateBot/1.0)" };
+  const [usdRes, tryRes] = await Promise.all([
+    fetch("https://yekrial.com/toman-rate/USD", { headers }),
+    fetch("https://yekrial.com/toman-rate/TRY", { headers }),
+  ]);
+  if (!usdRes.ok) throw new Error(`yekrial.com (USD) پاسخ HTTP ${usdRes.status} داد`);
+  if (!tryRes.ok) throw new Error(`yekrial.com (TRY) پاسخ HTTP ${tryRes.status} داد`);
+  const [usdHtml, tryHtml] = await Promise.all([usdRes.text(), tryRes.text()]);
 
-  const usdToman = extractYekrialTomanPrice(html, "USD");
-  const tryToman = extractYekrialTomanPrice(html, "TRY");
+  const usdToman = extractYekrialLiveTomanPrice(usdHtml);
+  const tryToman = extractYekrialLiveTomanPrice(tryHtml);
   if (!usdToman || !tryToman) {
-    throw new Error("yekrial.com: قیمت دلار یا لیر در صفحه پیدا نشد (شاید ساختار صفحه تغییر کرده)");
+    throw new Error("yekrial.com: قیمت دلار یا لیر در صفحه پیدا نشد (شاید ساختار صفحه دوباره تغییر کرده)");
   }
 
   const data = {
@@ -369,10 +380,17 @@ app.use(
 );
 
 // ── body parser ──────────────────────────────────────────────────────────
-// نکته‌ی مهم: مسیر وبهوک Lemon Squeezy باید body رو به‌صورت خام (raw buffer)
-// دریافت کنه، چون امضای HMAC روی همون بایت‌های خامِ ارسالی محاسبه می‌شه، نه
-// روی JSON.stringify شده‌ی دوباره. برای همین این مسیر رو از express.json()
-// عمومی مستثنی می‌کنیم و خودش پایین‌تر express.raw() جداگانه می‌گیره.
+// نکته‌ی مهم: مسیرهای وبهوکِ درگاه‌های پرداخت باید body رو به‌صورت خام (raw
+// buffer) دریافت کنن، چون در حالتی که امضای HMAC هم لازم باشه، امضا روی
+// همون بایت‌های خامِ ارسالی محاسبه می‌شه، نه روی JSON.stringify شده‌ی
+// دوباره. برای همین این مسیرها رو از express.json() عمومی مستثنی می‌کنیم و
+// خودشون پایین‌تر express.raw() جداگانه می‌گیرن.
+// ⚠️ TODO_VERIFY: مسیر /webhooks/payoneer با فرض احراز هویت Basic
+// Auth نوشته شده (ساده‌ترین و رایج‌ترین حالت برای این خانواده از APIهای
+// Optile/Payoneer Checkout)، که نیازی به raw body ندارد — اما اگه توی پنل
+// Payoneer دیدید که یک هدر امضا (مثلاً X-Payoneer-Signature) هم می‌فرسته،
+// حتماً این مسیر رو هم مثل lemonsqueezy به express.raw() ببرید و امضا رو
+// روی raw body چک کنید، نه روی body پارس‌شده.
 app.use((req, res, next) => {
   if (req.originalUrl === "/webhooks/lemonsqueezy") {
     return next();
@@ -589,6 +607,62 @@ const LS_VARIANT_LICENSE_MAP = {
   2059669: { tier: "gold", license_type: "lifetime", appGeneration: "v1" },
 };
 
+// ── نگاشت مرجع سفارش Payoneer Checkout → سطح و مدت لایسنس ────────────────
+// برخلاف Lemon Squeezy که یک variant_id ثابت روی محصول داشبوردش بود،
+// Payoneer Checkout معمولاً یک «مرجع سفارش» (merchant reference / order
+// id) رو خودِ سرور شما موقع ساخت صفحه‌ی پرداخت تعیین می‌کنه (یا اگه لینک
+// پرداخت ثابت از پنل دارید، همون لینک یک کد ثابت داره که می‌تونید توی
+// تنظیمات آن لینک یک reference دلخواه برایش بگذارید). پس این مقدار رو با
+// همون رشته‌ای که خودتان برای این محصول (لایسنس مادام‌العمر) انتخاب
+// می‌کنید عوض کنید — مثلاً "buskit-lifetime". این نگاشت عمداً سمت سرور
+// نگه داشته می‌شه (نه چیزی که از payload وبهوک خونده بشه)، تا کسی نتونه
+// با جعل payload لایسنس مجانی بگیره.
+const PAYONEER_REFERENCE_LICENSE_MAP = {
+  "buskit-lifetime": { tier: "gold", license_type: "lifetime", appGeneration: "v1" },
+};
+
+// ── احراز هویت وبهوک Payoneer Checkout ────────────────────────────────────
+// ⚠️ TODO_VERIFY: این تابع بر اساس رایج‌ترین مدل احراز هویتِ این خانواده از
+// APIها (Optile/Payoneer Checkout) نوشته شده: شما توی پنل Payoneer، بخش
+// Checkout → Integration → API access (یا معادلش برای notification URL)
+// یک username/password یا token تنظیم می‌کنید؛ Payoneer همون‌ها رو به‌صورت
+// HTTP Basic Auth روی هدر Authorization هر وبهوک می‌فرسته. من نتوانستم
+// مستقیماً صفحه‌ی رسمی وبهوک Payoneer را باز کنم (دسترسی برایم مسدود بود)،
+// پس این را حتماً یک بار با یک پرداخت تستی/Sandbox چک کنید: اگر واقعاً
+// Authorization: Basic ... می‌آید همین تابع کافیست؛ اگر به‌جایش یک هدر
+// امضا (مثل X-Payoneer-Signature) دیدید، این تابع را با HMAC (شبیه تابع
+// وبهوک Lemon Squeezy بالاتر) جایگزین کنید.
+function verifyPayoneerNotification(req) {
+  const authHeader = req.headers["authorization"] || "";
+  if (!authHeader.startsWith("Basic ")) return false;
+
+  const decoded = Buffer.from(authHeader.slice(6), "base64").toString("utf8");
+  const separatorIndex = decoded.indexOf(":");
+  if (separatorIndex === -1) return false;
+
+  const user = decoded.slice(0, separatorIndex);
+  const pass = decoded.slice(separatorIndex + 1);
+
+  const expectedUser = process.env.PAYONEER_NOTIFICATION_USER || "";
+  const expectedPass = process.env.PAYONEER_NOTIFICATION_PASS || "";
+  if (!expectedUser || !expectedPass) return false;
+
+  // constant-time compare تا از timing attack جلوگیری شه
+  const userBuf = Buffer.from(user);
+  const expectedUserBuf = Buffer.from(expectedUser);
+  const passBuf = Buffer.from(pass);
+  const expectedPassBuf = Buffer.from(expectedPass);
+
+  const userMatches =
+    userBuf.length === expectedUserBuf.length &&
+    crypto.timingSafeEqual(userBuf, expectedUserBuf);
+  const passMatches =
+    passBuf.length === expectedPassBuf.length &&
+    crypto.timingSafeEqual(passBuf, expectedPassBuf);
+
+  return userMatches && passMatches;
+}
+
 // ── کد سیستمیِ «بدون کد تخفیف» ────────────────────────────────────────────
 // هر سفارشی که هیچ کد تخفیفِ واقعی روش اعمال نشده (یا مشتری اصلاً کدی وارد
 // نکرده، یا برای همین آیتم مشخص discountApplied نداشته) به‌جای این‌که هیچ
@@ -608,7 +682,8 @@ function generateLicenseCode() {
   return code;
 }
 
-// ── ارسال ایمیل حاوی کد لایسنس به خریدار (بعد از تایید پرداخت Lemon Squeezy) ──
+// ── ارسال ایمیل حاوی کد لایسنس به خریدار (بعد از تایید پرداخت — مستقل از
+// درگاه، همین تابع برای Lemon Squeezy و Payoneer هردو صدا زده می‌شه) ──────
 async function sendLicenseEmail(email, name, licenseCode) {
   const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
   sendSmtpEmail.sender = {
@@ -1296,6 +1371,168 @@ app.post(
       console.error("خطا در وبهوک Lemon Squeezy:", err);
       // 200 برمی‌گردونیم تا Lemon Squeezy بی‌نهایت retry نکنه؛ خطا لاگ شده
       // و از پنل ادمین/لاگ‌ها قابل پیگیریه
+      return res.status(200).json({ ok: false });
+    }
+  },
+);
+
+// ════════════════════════════════════════════════════════════════════════
+//  وبهوک Payoneer Checkout → ساخت خودکار لایسنس + ایمیل به خریدار
+// ════════════════════════════════════════════════════════════════════════
+// جایگزین همون منطقِ وبهوک Lemon Squeezy بالا، برای Payoneer Checkout.
+// جریان کار:
+//   ۱) احراز هویت درخواست (فعلاً Basic Auth — به کامنت verifyPayoneerNotification
+//      نگاه کن، این بخش باید با یک تست واقعی تایید شه).
+//   ۲) فقط رویدادِ «پرداخت موفق» رو پردازش می‌کنیم.
+//   ۳) مرجع سفارش (reference) رو از PAYONEER_REFERENCE_LICENSE_MAP (نگاشتِ
+//      امنِ سمت سرور، نه چیزی که از payload خونده بشه) به tier/duration
+//      تبدیل می‌کنیم.
+//   ۴) با یک تراکنش، هم سند لایسنس جدید (is_used:false) می‌سازیم هم سند
+//      payoneerOrders/{orderId} رو برای idempotency (چون خیلی از این
+//      درگاه‌ها ممکنه همون وبهوک رو بیشتر از یک‌بار retry کنن).
+//   ۵) کد لایسنس رو با ایمیل به خریدار می‌فرستیم (از همون sendLicenseEmail
+//      قبلی، که مستقل از درگاه پرداخته).
+// توجه: این مسیر باید همیشه (حتی وقتی خطای داخلی داریم و لاگ می‌کنیم) با
+// status نزدیک به 200 جواب بده وگرنه Payoneer مدام retry می‌کنه؛ فقط برای
+// احراز هویت نامعتبر 401 برمی‌گردونیم چون اونجا واقعاً می‌خوایم رد کنیم.
+//
+// ⚠️ TODO_VERIFY (مهم): فیلدهای زیر (orderId/status/reference/email/name)
+// بر اساس ساختار عمومیِ رایج در این خانواده از APIها (Optile/Payoneer
+// Checkout) تخمین زده شده‌ن، نه از مستندات رسمی که من نتونستم بازش کنم.
+// حتماً قبل از رفتن به Production، یک پرداخت تستی (Sandbox) بزنید، payload
+// واقعی وبهوک رو لاگ کنید (یک console.log(JSON.stringify(payload)) موقت
+// همین زیر کافیه)، و اسم فیلدهای واقعی رو با آنچه در extractPayoneerFields
+// پایین‌تر خوانده می‌شه مقایسه/اصلاح کنید.
+function extractPayoneerFields(payload) {
+  // چند حالتِ محتمل رو امتحان می‌کنیم (fail-safe)، دقیقاً مثل الگوی
+  // fetchUsd... بالاتر که چند فیلد جایگزین رو با ?? امتحان می‌کنه.
+  const txn = payload?.transaction || payload;
+
+  const orderId =
+    txn?.transactionId || txn?.longId || payload?.longId || payload?.id;
+
+  const status =
+    txn?.payment?.status ||
+    txn?.status ||
+    payload?.status ||
+    payload?.transactionStatus;
+
+  const reference =
+    txn?.merchantTransactionId ||
+    txn?.reference ||
+    payload?.reference ||
+    payload?.merchantReference;
+
+  const email =
+    txn?.customer?.email ||
+    payload?.customer?.email ||
+    payload?.email;
+
+  const name =
+    [txn?.customer?.firstName, txn?.customer?.lastName]
+      .filter(Boolean)
+      .join(" ") ||
+    payload?.customer?.name ||
+    "";
+
+  return { orderId, status, reference, email, name };
+}
+
+app.post(
+  "/webhooks/payoneer",
+  async (req, res) => {
+    try {
+      if (!verifyPayoneerNotification(req)) {
+        return res.status(401).json({ error: "invalid authentication" });
+      }
+
+      const payload = req.body;
+
+      // برای پیدا کردن اسم واقعی فیلدها در اولین تست Sandbox، این خط رو
+      // موقتاً از کامنت خارج کن:
+      // console.log("Payoneer webhook payload:", JSON.stringify(payload));
+
+      const { orderId, status, reference, email, name } =
+        extractPayoneerFields(payload);
+
+      // فقط رویداد پرداخت موفق رو پردازش می‌کنیم؛ بقیه (pending/failed/...)
+      // رو نادیده می‌گیریم.
+      const successStatuses = ["SUCCESS", "CAPTURED", "CHARGED", "PAID"];
+      if (!status || !successStatuses.includes(String(status).toUpperCase())) {
+        return res.status(200).json({ ok: true, ignored: status || "unknown" });
+      }
+
+      if (!orderId || !email) {
+        console.error(
+          `وبهوک Payoneer با ساختار نامعتبر (orderId=${orderId}, email=${email}):`,
+          payload,
+        );
+        return res.status(200).json({ ok: true });
+      }
+
+      const info = PAYONEER_REFERENCE_LICENSE_MAP[reference];
+      if (!info) {
+        console.error(
+          `وبهوک Payoneer: reference ناشناخته (reference=${reference}, order=${orderId})`,
+        );
+        return res.status(200).json({ ok: true });
+      }
+
+      const licenseCode = generateLicenseCode();
+      const orderRef = db.collection("payoneerOrders").doc(String(orderId));
+
+      const created = await db.runTransaction(async (tx) => {
+        const existing = await tx.get(orderRef);
+        if (existing.exists) {
+          // این orderId قبلاً پردازش شده (وبهوک تکراری) — چیزی نساز
+          return { alreadyProcessed: true, licenseCode: existing.data().licenseCode };
+        }
+
+        tx.set(db.collection("licenses").doc(licenseCode), {
+          tier: info.tier,
+          license_type: info.license_type,
+          appGeneration: info.appGeneration || CURRENT_APP_GENERATION,
+          is_shared: false,
+          is_used: false,
+          name,
+          email,
+          source: "payoneer",
+          payoneer_order_id: String(orderId),
+          delivered: false,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        tx.set(orderRef, {
+          email,
+          name,
+          licenseCode,
+          tier: info.tier,
+          licenseType: info.license_type,
+          processedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        return { alreadyProcessed: false, licenseCode };
+      });
+
+      // اگه وبهوک تکراری بود، دیگه دوباره ایمیل نفرست
+      if (!created.alreadyProcessed) {
+        try {
+          await sendLicenseEmail(email, name, created.licenseCode);
+          await db.collection("licenses").doc(created.licenseCode).update({
+            delivered: true,
+          });
+        } catch (mailErr) {
+          // اگه ایمیل fail بشه، لایسنس همچنان توی Firestore ساخته شده و
+          // delivered:false می‌مونه — می‌تونی بعداً از پنل ادمین دستی بفرستیش
+          console.error("خطا در ارسال ایمیل لایسنس:", mailErr);
+        }
+      }
+
+      return res.status(200).json({ ok: true });
+    } catch (err) {
+      console.error("خطا در وبهوک Payoneer:", err);
+      // 200 برمی‌گردونیم تا Payoneer بی‌نهایت retry نکنه؛ خطا لاگ شده و از
+      // پنل ادمین/لاگ‌ها قابل پیگیریه
       return res.status(200).json({ ok: false });
     }
   },
