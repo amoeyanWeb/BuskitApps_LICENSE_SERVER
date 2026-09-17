@@ -50,76 +50,71 @@ const latestRates = {
 };
 const rateJobRetryTimers = { usdTry: null, usdIrr: null };
 
-// ── منبع ۱ برای نرخ دلار/لیر و منبع ۱ برای نرخ دلار/ریال: yekrial.com ──────
-// یک‌ریال (yekrial.com) هر دو قیمت دلار و لیر رو (به تومان) توی همون صفحه‌ی
-// اصلی نشون می‌ده. صفحه رو یک‌بار می‌خونیم، هر دو عدد رو از همون یک صفحه
-// استخراج می‌کنیم و کش می‌کنیم (۶۰ ثانیه) — طوری که وقتی هر دو job (لیر و
-// ریال) هم‌زمان (مثلاً از دکمه‌ی «بروزرسانی لحظه‌ای») اجرا می‌شن، هر دو از
-// روی دقیقاً همون یک قرائت حساب می‌شن، نه دو فچ جدا در دو لحظه‌ی متفاوت.
-// دلار→ریال مستقیم از قیمت دلار (×۱۰ برای تبدیل تومان به ریال) به دست
-// می‌آد؛ دلار→لیر از تقسیم قیمت دلار بر قیمت لیر (هر دو به تومان) محاسبه
-// می‌شه — چون هر دو به تومانن، ضرب در ۱۰ در تقسیم ساده می‌شه.
-let yekrialCache = { at: 0, data: null };
-const YEKRIAL_CACHE_TTL_MS = 60 * 1000; // ۶۰ ثانیه
+// ── منبع ۱ برای نرخ دلار/لیر و منبع ۱ برای نرخ دلار/ریال: alanchand.com ────
+// yekrial.com پشت Cloudflare قرار گرفته و همیشه به سرورها ۴۰۳ (صفحه‌ی چالش)
+// می‌ده — از سرورهای هاستینگ ابری (مثل Render) اصلاً قابل‌عبور نیست، پس
+// جایگزینش کردیم. alanchand.com توی یک صفحه (exchange-rates/usd-try) هم
+// نرخ دلار/لیر و هم نرخ دلار/ریالِ بازار آزاد رو با هم نشون می‌ده — با یک
+// fetch هر دو عدد از دقیقاً همون یک لحظه به دست می‌آد، نه دو درخواست جدا در
+// دو زمان متفاوت. مقدار ریال مستقیماً به «ریال» گزارش می‌شه (نه تومان)، پس
+// نیازی به ضرب در ۱۰ نیست.
+let alanchandCache = { at: 0, data: null };
+const ALANCHAND_CACHE_TTL_MS = 60 * 1000; // ۶۰ ثانیه
 
-// یک‌ریال صفحه‌ی هر ارز رو ریدیزاین کرده: برچسب «قیمت فعلی» که قبلاً ازش
-// استفاده می‌کردیم دیگه روی سایت وجود نداره؛ الان هر ارز صفحه‌ی اختصاصی خودش
-// (yekrial.com/toman-rate/{code}) رو داره و نرخ بازار آزاد زیر برچسب
-// «نرخ لحظه‌ای» می‌آد (نمونه‌ی واقعیِ صفحه: «نرخ لحظه‌ای ۲۳۰٬۶۰۰ تومان»).
-// برای مقاوم بودن در برابر ریدیزاین‌های بعدی، به‌جای رجکس روی HTML خام، اول
-// همه‌ی تگ‌ها رو حذف می‌کنیم و متن ساده رو می‌گردیم — این‌جوری تغییر کلاس‌های
-// CSS یا چیدمان تگ‌ها دیگه چیزی رو نمی‌شکنه، فقط اگر خودِ برچسب «نرخ لحظه‌ای»
-// عوض بشه لازمه این تابع دوباره آپدیت شه.
-function extractYekrialLiveTomanPrice(html) {
+// به‌جای وابستگی به کلاس‌های CSS یا چیدمان تگ‌ها (که با هر ریدیزاین سایت
+// می‌شکنه)، اول همه‌ی تگ‌ها رو حذف می‌کنیم و روی متن سادهٔ صفحه دنبال دو
+// جمله‌ی طبیعیِ انگلیسیِ صفحه می‌گردیم که خیلی بعیده عوض بشن:
+//   «1 US Dollar = 48.7 Turkish Lira»   → نرخ دلار به لیر
+//   «...price of US Dollar in the market was 2,313,000 Iranian Rials»
+//                                        → نرخ دلار به ریالِ بازار آزاد
+function extractAlanchandRates(html) {
   const plainText = html
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
     .replace(/<[^>]+>/g, " ")
     .replace(/&nbsp;/gi, " ")
-    .replace(/\u200c/g, "") // نیم‌فاصله‌ی «لحظه‌ای» رو حذف می‌کنیم تا با متن هدف یکی بشه
     .replace(/\s+/g, " ");
 
-  const m = plainText.match(/نرخ لحظهای\s*([\d,]{3,9})\s*تومان/);
-  if (!m) return null;
-  const value = Number(m[1].replace(/,/g, ""));
-  return Number.isFinite(value) && value > 0 ? value : null;
+  const tryMatch = plainText.match(/1\s*US Dollar\s*=\s*([\d,]+(?:\.\d+)?)\s*Turkish Lira/i);
+  const irrMatch = plainText.match(/price of US Dollar in the market was\s*([\d,]+)\s*Iranian Rials/i);
+
+  const usdToTry = tryMatch ? Number(tryMatch[1].replace(/,/g, "")) : null;
+  const usdToIrr = irrMatch ? Number(irrMatch[1].replace(/,/g, "")) : null;
+
+  return {
+    usdToTry: Number.isFinite(usdToTry) && usdToTry > 0 ? usdToTry : null,
+    usdToIrr: Number.isFinite(usdToIrr) && usdToIrr > 0 ? usdToIrr : null,
+  };
 }
 
-async function fetchRatesFromYekrial() {
+async function fetchRatesFromAlanchand() {
   const now = Date.now();
-  if (yekrialCache.data && now - yekrialCache.at < YEKRIAL_CACHE_TTL_MS) {
-    return yekrialCache.data;
+  if (alanchandCache.data && now - alanchandCache.at < ALANCHAND_CACHE_TTL_MS) {
+    return alanchandCache.data;
   }
 
-  const headers = { "User-Agent": "Mozilla/5.0 (compatible; BuskitRateBot/1.0)" };
-  const [usdRes, tryRes] = await Promise.all([
-    fetch("https://yekrial.com/toman-rate/USD", { headers }),
-    fetch("https://yekrial.com/toman-rate/TRY", { headers }),
-  ]);
-  if (!usdRes.ok) throw new Error(`yekrial.com (USD) پاسخ HTTP ${usdRes.status} داد`);
-  if (!tryRes.ok) throw new Error(`yekrial.com (TRY) پاسخ HTTP ${tryRes.status} داد`);
-  const [usdHtml, tryHtml] = await Promise.all([usdRes.text(), tryRes.text()]);
+  const res = await fetch("https://alanchand.com/en/exchange-rates/usd-try", {
+    headers: { "User-Agent": "Mozilla/5.0 (compatible; BuskitRateBot/1.0)" },
+  });
+  if (!res.ok) throw new Error(`alanchand.com پاسخ HTTP ${res.status} داد`);
+  const html = await res.text();
 
-  const usdToman = extractYekrialLiveTomanPrice(usdHtml);
-  const tryToman = extractYekrialLiveTomanPrice(tryHtml);
-  if (!usdToman || !tryToman) {
-    throw new Error("yekrial.com: قیمت دلار یا لیر در صفحه پیدا نشد (شاید ساختار صفحه دوباره تغییر کرده)");
+  const { usdToTry, usdToIrr } = extractAlanchandRates(html);
+  if (!usdToTry || !usdToIrr) {
+    throw new Error("alanchand.com: نرخ دلار/لیر یا دلار/ریال در صفحه پیدا نشد (شاید ساختار صفحه تغییر کرده)");
   }
 
-  const data = {
-    usdToIrr: usdToman * 10, // تومان → ریال
-    usdToTry: usdToman / tryToman, // ۱ دلار = چند لیر
-  };
-  yekrialCache = { at: now, data };
+  const data = { usdToTry, usdToIrr };
+  alanchandCache = { at: now, data };
   return data;
 }
 
-async function fetchUsdTryFromYekrial() {
-  const { usdToTry } = await fetchRatesFromYekrial();
+async function fetchUsdTryFromAlanchand() {
+  const { usdToTry } = await fetchRatesFromAlanchand();
   return usdToTry;
 }
-async function fetchUsdIrrFromYekrial() {
-  const { usdToIrr } = await fetchRatesFromYekrial();
+async function fetchUsdIrrFromAlanchand() {
+  const { usdToIrr } = await fetchRatesFromAlanchand();
   return usdToIrr;
 }
 
@@ -151,8 +146,11 @@ async function fetchUsdTryFromFrankfurter() {
   return rate;
 }
 
-// ── منبع ۲ برای نرخ دلار/ریال بازار آزاد: bonbast ──────────────────────────
-// bonbast قیمت را به «تومان» می‌دهد؛ اینجا در ۱۰ ضرب می‌کنیم تا به ریال تبدیل شود.
+// ── منبع ۲ و ۳ برای نرخ دلار/ریال بازار آزاد: bonbast و brsapi ─────────────
+// هر دو فعلاً از کار افتاده‌ن (bonbast.amirhn.com دیگه اصلاً resolve نمی‌شه؛
+// کلید رایگانِ مستندشدهٔ brsapi هم دیگه معتبر نیست) ولی به‌عنوان fallback
+// نگه داشته شدن — اگه یه روز دوباره سرپا شدن، خودکار دوباره استفاده می‌شن،
+// و تا اون موقع فقط سریع شکست می‌خورن و به منبع بعدی می‌رن.
 async function fetchUsdIrrFromBonbast() {
   const res = await fetch("https://bonbast.amirhn.com/latest");
   if (!res.ok) throw new Error(`bonbast پاسخ HTTP ${res.status} داد`);
@@ -164,7 +162,6 @@ async function fetchUsdIrrFromBonbast() {
   return toman * 10; // تومان → ریال
 }
 
-// ── منبع ۳ برای نرخ دلار/ریال بازار آزاد: brsapi (رایگان) ─────────────────
 async function fetchUsdIrrFromBrsApi() {
   const res = await fetch("https://BrsApi.ir/FreeTsetmcBourseApi/Api_Free_Gold_Currency_v2.json");
   if (!res.ok) throw new Error(`brsapi پاسخ HTTP ${res.status} داد`);
@@ -179,12 +176,12 @@ async function fetchUsdIrrFromBrsApi() {
 }
 
 const USD_TRY_SOURCES = [
-  { name: "yekrial.com", fn: fetchUsdTryFromYekrial },
+  { name: "alanchand.com", fn: fetchUsdTryFromAlanchand },
   { name: "doviz.com", fn: fetchUsdTryFromDovizCom },
   { name: "Frankfurter", fn: fetchUsdTryFromFrankfurter },
 ];
 const USD_IRR_SOURCES = [
-  { name: "yekrial.com", fn: fetchUsdIrrFromYekrial },
+  { name: "alanchand.com", fn: fetchUsdIrrFromAlanchand },
   { name: "bonbast", fn: fetchUsdIrrFromBonbast },
   { name: "brsapi", fn: fetchUsdIrrFromBrsApi },
 ];
