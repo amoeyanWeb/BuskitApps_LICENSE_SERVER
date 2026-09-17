@@ -2287,6 +2287,59 @@ app.get("/rates/latest", (req, res) => {
   });
 });
 
+// ── مسیر موقت دیباگ (بدون نیاز به Shell) — برای دیدن اینکه از شبکه‌ی همین
+// سرور Render واقعاً چه پاسخی از منبع‌های نرخ ریال می‌گیریم. فقط GET، بدون
+// نیاز به توکن، چون هیچ داده‌ی حساسی برنمی‌گردونه و برای موقتی‌ست.
+// بعد از رفع مشکل حتماً این بلوک حذف بشه.
+// نمونه استفاده (مستقیم توی مرورگر باز کن):
+//   https://<آدرس-سرور-شما>/debug/probe?source=brsapi
+//   https://<آدرس-سرور-شما>/debug/probe?source=bonbast
+//   https://<آدرس-سرور-شما>/debug/probe?source=yekrial
+//   https://<آدرس-سرور-شما>/debug/probe?source=doviz
+const DEBUG_PROBE_URLS = {
+  brsapi:
+    "https://Api.BrsApi.ir/Market/Gold_Currency_Pro.php?key=FreeSV0E1LSgB9RDjuf0QorSLViX8pPG&symbol=USD",
+  bonbast: "https://bonbast.amirhn.com/latest",
+  yekrial: "https://yekrial.com/toman-rate/USD",
+  doviz: "https://www.doviz.com/api/v1/currencies/all/latest",
+};
+app.get("/debug/probe", async (req, res) => {
+  const key = (req.query.source || "").toString();
+  const url = DEBUG_PROBE_URLS[key];
+  if (!url) {
+    return res.status(400).json({
+      status: "error",
+      error: `پارامتر source نامعتبر یا خالی؛ یکی از این‌ها رو بده: ${Object.keys(DEBUG_PROBE_URLS).join(", ")}`,
+    });
+  }
+  const startedAt = Date.now();
+  try {
+    const r = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; BuskitRateBot/1.0)" },
+    });
+    const text = await r.text();
+    return res.status(200).json({
+      status: "ok",
+      source: key,
+      url,
+      httpStatus: r.status,
+      httpStatusText: r.statusText,
+      ms: Date.now() - startedAt,
+      bodyPreview: text.slice(0, 3000),
+      bodyLength: text.length,
+    });
+  } catch (err) {
+    return res.status(200).json({
+      status: "error",
+      source: key,
+      url,
+      ms: Date.now() - startedAt,
+      error: err.message,
+      errorCause: err.cause ? String(err.cause) : null,
+    });
+  }
+});
+
 // ── واداشتن سرور به گرفتن فوری نرخ‌ها (فقط ادمین) — برای تست ─────────────
 app.post("/admin/refresh-rates", requireAdmin, async (req, res) => {
   const [usdTry, usdIrr] = await Promise.all([
