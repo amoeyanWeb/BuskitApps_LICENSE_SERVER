@@ -2302,6 +2302,7 @@ const DEBUG_PROBE_URLS = {
   bonbast: "https://bonbast.amirhn.com/latest",
   yekrial: "https://yekrial.com/toman-rate/USD",
   doviz: "https://www.doviz.com/api/v1/currencies/all/latest",
+  alanchand: "https://alanchand.com/en/exchange-rates/usd-try",
 };
 app.get("/debug/probe", async (req, res) => {
   const key = (req.query.source || "").toString();
