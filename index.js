@@ -1041,6 +1041,7 @@ app.post("/request-probation-license", async (req, res) => {
           `نام: ${cleanName}\n` +
           `ایمیل: ${cleanEmail}\n` +
           `واتس‌آپ خریدار: ${cleanWhatsapp}\n` +
+          `کد لایسنس: ${licenseCode}\n` +
           `تاریخ/ساعت: ${now}`,
       );
     } catch (mailErr) {
