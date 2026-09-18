@@ -17,10 +17,17 @@
 //      دانلود کن و کنار این اسکریپت بذار.
 //   3) اجرا:
 //        node generate-licenses.js 50
-//      عدد آخر تعداد لایسنس‌های موردنظره (پیش‌فرض: 10).
-//   4) بعد از اجرا، یک فایل licenses-<تاریخ>.csv کنار همین اسکریپت ساخته
-//      می‌شه که هم کدها رو داره هم می‌تونی مستقیم برای هرکسی که فرستادی
-//      یادداشت کنی به کی دادی (ستون‌های name/email/note رو دستی پر کن).
+//        node generate-licenses.js BMM 50
+//      یکی از آرگومان‌ها عدد تعداد لایسنس‌هاست (پیش‌فرض: 10)، اون یکی
+//      (اختیاری) نام فروشنده‌ست — ترتیبشون مهم نیست، هرکدوم عدد بود
+//      بعنوان تعداد در نظر گرفته می‌شه. نام فروشنده روی تک‌تک لایسنس‌های
+//      همون دسته (فیلد seller) درج می‌شه.
+//   4) روی هر لایسنس، فیلدهای name (پیش‌فرض «Noname»)، email و whatsapp
+//      هم خالی/پیش‌فرض ساخته می‌شن تا بعداً از پنل ادمین یا مستقیم توی
+//      Firestore پرشون کنی؛ همون فیلدهایی‌ان که admin.html هم نمایش می‌ده.
+//   5) بعد از اجرا، یک فایل licenses-<تاریخ>.csv کنار همین اسکریپت ساخته
+//      می‌شه که کدها + نام فروشنده رو داره؛ ستون‌های name/email/whatsapp/note
+//      رو می‌تونی دستی پر کنی.
 
 const admin = require("firebase-admin");
 const crypto = require("crypto");
@@ -60,7 +67,12 @@ function generateLicenseCode() {
 // برای یک لایسنس دائمی (لایف‌تایم) می‌سازن؛ یعنی expires_at اصلاً ست
 // نمی‌شه (نامحدود)، و is_used:false یعنی هنوز روی هیچ گوشی‌ای فعال نشده —
 // اولین گوشی‌ای که این کد رو توی اپ وارد کنه، صاحبش می‌شه.
-function buildLifetimeLicenseDoc() {
+// seller/name/email/whatsapp هیچ‌کدوم توسط /activate یا /signin خونده
+// نمی‌شن (اون دو مسیر فقط tier/license_type/is_shared/is_used/expires_at
+// رو نگاه می‌کنن)، پس اضافه‌شدنشون هیچ اثری روی فعال‌سازی/شناسایی نداره؛
+// فقط برای پیگیری و نمایش توی پنل ادمین (admin.html) هستن — همون فیلدهایی
+// که جدول لایسنس‌ها همین الان هم نمایش می‌ده.
+function buildLifetimeLicenseDoc(sellerName) {
   return {
     tier: "gold",
     license_type: "lifetime",
@@ -68,18 +80,40 @@ function buildLifetimeLicenseDoc() {
     is_shared: false,
     is_used: false,
     source: "manual-batch", // فقط برای تشخیص در پنل ادمین/گزارش‌گیری
+    seller: sellerName || "", // نام فروشنده — دستی از خط فرمان گرفته می‌شه
+    name: "Noname", // نام خریدار — بعداً دستی پر می‌شه
+    email: "", // ایمیل خریدار — بعداً دستی پر می‌شه
+    whatsapp: "", // واتس‌اپ خریدار — بعداً دستی پر می‌شه
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
   };
 }
 
 async function main() {
-  const count = parseInt(process.argv[2], 10) || 10;
+  // ── آرگومان‌های خط فرمان — ترتیب مهم نیست ────────────────────────────
+  // هرکدوم از دو آرگومان که خالص عدد بود، «تعداد»ه؛ اون یکی (اگه بود)
+  // «نام فروشنده»ست. یعنی هم «BMM 50» هم «50 BMM» یکی‌ان.
+  const rawArgs = process.argv.slice(2);
+  let sellerName = "";
+  let count = null;
+  for (const arg of rawArgs) {
+    const trimmed = arg.trim();
+    const n = parseInt(trimmed, 10);
+    if (!Number.isNaN(n) && String(n) === trimmed) {
+      count = n;
+    } else if (trimmed) {
+      sellerName = trimmed;
+    }
+  }
+  if (count === null) count = 10;
+
   if (count <= 0 || count > 500) {
     console.error("❌ تعداد باید بین ۱ تا ۵۰۰ باشه (برای اعداد بزرگ‌تر، چندبار اجرا کن).");
     process.exit(1);
   }
 
-  console.log(`در حال ساخت ${count} لایسنس دائمی...`);
+  console.log(
+    `در حال ساخت ${count} لایسنس دائمی${sellerName ? ` برای فروشنده «${sellerName}»` : ""}...`,
+  );
 
   const codes = [];
   const licensesRef = db.collection("licenses");
@@ -99,18 +133,22 @@ async function main() {
   // ── نوشتن همه‌ی اسناد در یک batch اتمیک (حداکثر ۵۰۰ نوشتن در هر batch) ──
   const batch = db.batch();
   codes.forEach((code) => {
-    batch.set(licensesRef.doc(code), buildLifetimeLicenseDoc());
+    batch.set(licensesRef.doc(code), buildLifetimeLicenseDoc(sellerName));
   });
   await batch.commit();
 
   console.log(`✅ ${codes.length} لایسنس دائمی با موفقیت در Firestore ساخته شد.`);
 
-  // ── خروجی CSV کنار همین اسکریپت — ستون‌های name/email/note رو خودت بعداً
-  // دستی، هر کد رو که به کسی دادی، پر کن (فقط برای پیگیری خودت، هیچ اثری
-  // روی خودِ لایسنس نداره) ──
+  // ── خروجی CSV کنار همین اسکریپت — ستون‌های name/email/whatsapp/note رو
+  // خودت بعداً دستی، هر کد رو که به کسی دادی، پر کن (فقط برای پیگیری خودت،
+  // هیچ اثری روی خودِ لایسنس نداره؛ مقدار seller همون چیزیه که همین الان
+  // روی خودِ سند Firestore هم نوشته شده) ──
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const outPath = path.join(__dirname, `licenses-${stamp}.csv`);
-  const csvLines = ["license_code,name,email,note", ...codes.map((c) => `${c},,,`)];
+  const csvLines = [
+    "license_code,seller,name,email,whatsapp,note",
+    ...codes.map((c) => `${c},${sellerName},Noname,,,`),
+  ];
   fs.writeFileSync(outPath, csvLines.join("\n"), "utf8");
 
   console.log(`📄 لیست کدها اینجا ذخیره شد: ${outPath}`);
