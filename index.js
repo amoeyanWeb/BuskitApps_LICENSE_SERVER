@@ -4,6 +4,25 @@ require("dotenv").config();
 
 const admin = require("firebase-admin");
 const crypto = require("crypto");
+const https = require("https");
+
+// ── اعلان واتس‌آپ به مالک سایت (CallMeBot) ──────────────────────────────────
+// هر بار یک لایسنس صادر و ایمیلش با موفقیت ارسال می‌شود، همان لحظه یک پیام
+// واتس‌آپ هم به شماره‌ی خودمان می‌رود. fire-and-forget است؛ خطای احتمالی‌اش
+// هرگز روند اصلی صدور لایسنس/پاسخ به کاربر را مختل نمی‌کند.
+const CALLMEBOT_PHONE = "905312691609"; // بدون + و بدون صفر اضافه
+const CALLMEBOT_APIKEY = process.env.CALLMEBOT_APIKEY || "8925384";
+
+function notifyWhatsapp(text) {
+  const url = `https://api.callmebot.com/whatsapp.php?phone=${CALLMEBOT_PHONE}&text=${encodeURIComponent(text)}&apikey=${CALLMEBOT_APIKEY}`;
+  https
+    .get(url, (res) => {
+      res.resume();
+    })
+    .on("error", (err) => {
+      console.error("خطا در ارسال اعلان واتس‌آپ:", err.message);
+    });
+}
 
 // ── Firebase init ─────────────────────────────────────────────────────────
 const serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT);
@@ -998,6 +1017,9 @@ app.post("/request-probation-license", async (req, res) => {
       });
 
     let emailSent = true;
+    const now = new Date().toLocaleString("fa-IR", {
+      timeZone: "Europe/Istanbul",
+    });
     try {
       await sendProbationLicenseEmail(
         cleanEmail,
@@ -1012,9 +1034,29 @@ app.post("/request-probation-license", async (req, res) => {
           delivered: true,
           deliveredAt: admin.firestore.FieldValue.serverTimestamp(),
         });
+
+      notifyWhatsapp(
+        `📩 لایسنس جدید صادر شد\n` +
+          `منبع خرید: Probation (آزمایشی رایگان)\n` +
+          `نام: ${cleanName}\n` +
+          `ایمیل: ${cleanEmail}\n` +
+          `واتس‌آپ خریدار: ${cleanWhatsapp}\n` +
+          `تاریخ/ساعت: ${now}`,
+      );
     } catch (mailErr) {
       emailSent = false;
       console.error("خطا در ارسال ایمیل لایسنس probation:", mailErr);
+
+      notifyWhatsapp(
+        `⚠️ لایسنس صادر شد ولی ایمیل ارسال نشد\n` +
+          `منبع خرید: Probation (آزمایشی رایگان)\n` +
+          `نام: ${cleanName}\n` +
+          `ایمیل: ${cleanEmail}\n` +
+          `واتس‌آپ خریدار: ${cleanWhatsapp}\n` +
+          `کد لایسنس: ${licenseCode}\n` +
+          `تاریخ/ساعت: ${now}\n` +
+          `خطا: ${mailErr.message || mailErr}`,
+      );
     }
 
     // ثبت درخواست برای پنل ادمین (همان کالکشنی که قبلاً سایت خودش می‌نوشت)
@@ -1366,15 +1408,36 @@ app.post(
 
       // اگه وبهوک تکراری بود، دیگه دوباره ایمیل نفرست
       if (!created.alreadyProcessed) {
+        const now = new Date().toLocaleString("fa-IR", {
+          timeZone: "Europe/Istanbul",
+        });
         try {
           await sendLicenseEmail(email, name, created.licenseCode);
           await db.collection("licenses").doc(created.licenseCode).update({
             delivered: true,
           });
+          notifyWhatsapp(
+            `💰 لایسنس خریداری‌شده صادر شد\n` +
+              `منبع خرید: Lemon Squeezy\n` +
+              `نام: ${name}\n` +
+              `ایمیل: ${email}\n` +
+              `تیر: ${info.tier}\n` +
+              `کد لایسنس: ${created.licenseCode}\n` +
+              `تاریخ/ساعت: ${now}`,
+          );
         } catch (mailErr) {
           // اگه ایمیل fail بشه، لایسنس همچنان توی Firestore ساخته شده و
           // delivered:false می‌مونه — می‌تونی بعداً از پنل ادمین دستی بفرستیش
           console.error("خطا در ارسال ایمیل لایسنس:", mailErr);
+          notifyWhatsapp(
+            `⚠️ لایسنس خریداری‌شده صادر شد ولی ایمیل ارسال نشد\n` +
+              `منبع خرید: Lemon Squeezy\n` +
+              `نام: ${name}\n` +
+              `ایمیل: ${email}\n` +
+              `کد لایسنس: ${created.licenseCode}\n` +
+              `تاریخ/ساعت: ${now}\n` +
+              `خطا: ${mailErr.message || mailErr}`,
+          );
         }
       }
 
@@ -1528,15 +1591,36 @@ app.post(
 
       // اگه وبهوک تکراری بود، دیگه دوباره ایمیل نفرست
       if (!created.alreadyProcessed) {
+        const now = new Date().toLocaleString("fa-IR", {
+          timeZone: "Europe/Istanbul",
+        });
         try {
           await sendLicenseEmail(email, name, created.licenseCode);
           await db.collection("licenses").doc(created.licenseCode).update({
             delivered: true,
           });
+          notifyWhatsapp(
+            `💰 لایسنس خریداری‌شده صادر شد\n` +
+              `منبع خرید: Payoneer\n` +
+              `نام: ${name}\n` +
+              `ایمیل: ${email}\n` +
+              `تیر: ${info.tier}\n` +
+              `کد لایسنس: ${created.licenseCode}\n` +
+              `تاریخ/ساعت: ${now}`,
+          );
         } catch (mailErr) {
           // اگه ایمیل fail بشه، لایسنس همچنان توی Firestore ساخته شده و
           // delivered:false می‌مونه — می‌تونی بعداً از پنل ادمین دستی بفرستیش
           console.error("خطا در ارسال ایمیل لایسنس:", mailErr);
+          notifyWhatsapp(
+            `⚠️ لایسنس خریداری‌شده صادر شد ولی ایمیل ارسال نشد\n` +
+              `منبع خرید: Payoneer\n` +
+              `نام: ${name}\n` +
+              `ایمیل: ${email}\n` +
+              `کد لایسنس: ${created.licenseCode}\n` +
+              `تاریخ/ساعت: ${now}\n` +
+              `خطا: ${mailErr.message || mailErr}`,
+          );
         }
       }
 
