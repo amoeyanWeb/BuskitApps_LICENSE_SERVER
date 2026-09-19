@@ -4,45 +4,11 @@ require("dotenv").config();
 
 const admin = require("firebase-admin");
 const crypto = require("crypto");
-const https = require("https");
-
-// ── اعلان واتس‌آپ به مالک سایت (CallMeBot) ──────────────────────────────────
-// هر بار یک لایسنس صادر و ایمیلش با موفقیت ارسال می‌شود، همان لحظه یک پیام
-// واتس‌آپ هم به شماره‌ی خودمان می‌رود. fire-and-forget است؛ خطای احتمالی‌اش
-// هرگز روند اصلی صدور لایسنس/پاسخ به کاربر را مختل نمی‌کند.
-const CALLMEBOT_PHONE = "905312691609"; // بدون + و بدون صفر اضافه
-const CALLMEBOT_APIKEY = process.env.CALLMEBOT_APIKEY || "8925384";
-
-function notifyWhatsapp(text) {
-  const url = `https://api.callmebot.com/whatsapp.php?phone=${CALLMEBOT_PHONE}&text=${encodeURIComponent(text)}&apikey=${CALLMEBOT_APIKEY}`;
-  https
-    .get(url, (res) => {
-      res.resume();
-    })
-    .on("error", (err) => {
-      console.error("خطا در ارسال اعلان واتس‌آپ:", err.message);
-    });
-}
 
 // ── Firebase init ─────────────────────────────────────────────────────────
 const serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT);
 admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 const db = admin.firestore();
-
-// ── اتصال دوم: پروژه‌ی buskitlivefxsite ─────────────────────────────────────
-// سایت اصلی (index.html/script.js) و بخش نمایش نرخ در پنل ادمین، هر دو از
-// اپ پیش‌فرض Firebase با projectId «buskitlivefxsite» می‌خونن — که کاملاً از
-// پروژه‌ی livefx-b43d5 (بالا) جداست. برای همین سند rates/latest باید توی
-// همین پروژه‌ی دوم نوشته بشه، نه توی livefx-b43d5؛ در غیر این صورت سرور
-// موفق می‌نویسه ولی جایی که کسی نمی‌بینتش. بقیه‌ی مسیرها (license, discount
-// code, appVersions و...) دست‌نخورده از همون اتصال اول (db/livefx-b43d5)
-// استفاده می‌کنن، چون admin.html هم دقیقاً همونجا می‌خونتشون (dbLiveFX).
-const buskitSiteServiceAccount = JSON.parse(process.env.SERVICE_ACCOUNT_BUSKITSITE);
-const buskitSiteApp = admin.initializeApp(
-  { credential: admin.credential.cert(buskitSiteServiceAccount) },
-  "buskitSite",
-);
-const buskitSiteDb = buskitSiteApp.firestore();
 
 // ══════════════════════════════════════════════════════════════════════════
 // ── نرخ ارز (دلار/لیر و دلار/ریال بازار آزاد) ───────────────────────────────
@@ -69,7 +35,7 @@ const buskitSiteDb = buskitSiteApp.firestore();
 // fetchUsdTryFromDovizCom) فقط URL و نگاشت فیلدها را عوض کنی؛ بقیه‌ی سیستم
 // (زمان‌بندی، تلاش مجدد، کش، ذخیره در Firestore) دست‌نخورده کار می‌کند.
 // ══════════════════════════════════════════════════════════════════════════
-const RATES_DOC_REF = buskitSiteDb.collection("rates").doc("latest");
+const RATES_DOC_REF = db.collection("rates").doc("latest");
 const ISTANBUL_TZ = "Europe/Istanbul";
 const RATE_RETRY_INTERVAL_MS = 30 * 60 * 1000; // نیم ساعت
 
@@ -84,71 +50,65 @@ const latestRates = {
 };
 const rateJobRetryTimers = { usdTry: null, usdIrr: null };
 
-// ── منبع ۱ برای نرخ دلار/لیر و منبع ۱ برای نرخ دلار/ریال: alanchand.com ────
-// yekrial.com پشت Cloudflare قرار گرفته و همیشه به سرورها ۴۰۳ (صفحه‌ی چالش)
-// می‌ده — از سرورهای هاستینگ ابری (مثل Render) اصلاً قابل‌عبور نیست، پس
-// جایگزینش کردیم. alanchand.com توی یک صفحه (exchange-rates/usd-try) هم
-// نرخ دلار/لیر و هم نرخ دلار/ریالِ بازار آزاد رو با هم نشون می‌ده — با یک
-// fetch هر دو عدد از دقیقاً همون یک لحظه به دست می‌آد، نه دو درخواست جدا در
-// دو زمان متفاوت. مقدار ریال مستقیماً به «ریال» گزارش می‌شه (نه تومان)، پس
-// نیازی به ضرب در ۱۰ نیست.
-let alanchandCache = { at: 0, data: null };
-const ALANCHAND_CACHE_TTL_MS = 60 * 1000; // ۶۰ ثانیه
+// ── منبع ۱ برای نرخ دلار/لیر و منبع ۱ برای نرخ دلار/ریال: yekrial.com ──────
+// یک‌ریال (yekrial.com) هر دو قیمت دلار و لیر رو (به تومان) توی همون صفحه‌ی
+// اصلی نشون می‌ده. صفحه رو یک‌بار می‌خونیم، هر دو عدد رو از همون یک صفحه
+// استخراج می‌کنیم و کش می‌کنیم (۶۰ ثانیه) — طوری که وقتی هر دو job (لیر و
+// ریال) هم‌زمان (مثلاً از دکمه‌ی «بروزرسانی لحظه‌ای») اجرا می‌شن، هر دو از
+// روی دقیقاً همون یک قرائت حساب می‌شن، نه دو فچ جدا در دو لحظه‌ی متفاوت.
+// دلار→ریال مستقیم از قیمت دلار (×۱۰ برای تبدیل تومان به ریال) به دست
+// می‌آد؛ دلار→لیر از تقسیم قیمت دلار بر قیمت لیر (هر دو به تومان) محاسبه
+// می‌شه — چون هر دو به تومانن، ضرب در ۱۰ در تقسیم ساده می‌شه.
+let yekrialCache = { at: 0, data: null };
+const YEKRIAL_CACHE_TTL_MS = 60 * 1000; // ۶۰ ثانیه
 
-// به‌جای وابستگی به کلاس‌های CSS یا چیدمان تگ‌ها (که با هر ریدیزاین سایت
-// می‌شکنه)، اول همه‌ی تگ‌ها رو حذف می‌کنیم و روی متن سادهٔ صفحه دنبال دو
-// جمله‌ی طبیعیِ انگلیسیِ صفحه می‌گردیم که خیلی بعیده عوض بشن:
-//   «1 US Dollar = 48.7 Turkish Lira»   → نرخ دلار به لیر
-//   «...price of US Dollar in the market was 2,313,000 Iranian Rials»
-//                                        → نرخ دلار به ریالِ بازار آزاد
-function extractAlanchandRates(html) {
-  const plainText = html
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/\s+/g, " ");
-
-  const tryMatch = plainText.match(/1\s*US Dollar\s*=\s*([\d,]+(?:\.\d+)?)\s*Turkish Lira/i);
-  const irrMatch = plainText.match(/price of US Dollar in the market was\s*([\d,]+)\s*Iranian Rials/i);
-
-  const usdToTry = tryMatch ? Number(tryMatch[1].replace(/,/g, "")) : null;
-  const usdToIrr = irrMatch ? Number(irrMatch[1].replace(/,/g, "")) : null;
-
-  return {
-    usdToTry: Number.isFinite(usdToTry) && usdToTry > 0 ? usdToTry : null,
-    usdToIrr: Number.isFinite(usdToIrr) && usdToIrr > 0 ? usdToIrr : null,
-  };
+// به‌جای وابستگی به متن دقیق و کلاس‌های CSS صفحه (که با هر ریدیزاین سایت
+// می‌شکنه)، دنبال لینک پایدار toman-rate/{code} می‌گردیم و اولین عدد+«تومان»
+// که تا ۴۰۰ کاراکتر بعدش می‌آد رو به‌عنوان قیمت برمی‌داریم.
+function extractYekrialTomanPrice(html, code) {
+  const re = new RegExp(
+    `toman-rate/${code}["'/][\\s\\S]{0,300}?قیمت فعلی(?:<[^>]+>|\\s|&nbsp;|\\u00A0)*` +
+      `([\\d,]{3,9})(?:<[^>]+>|\\s|&nbsp;|\\u00A0)*تومان`,
+    "i",
+  );
+  const m = html.match(re);
+  if (!m) return null;
+  const value = Number(m[1].replace(/,/g, ""));
+  return Number.isFinite(value) && value > 0 ? value : null;
 }
 
-async function fetchRatesFromAlanchand() {
+async function fetchRatesFromYekrial() {
   const now = Date.now();
-  if (alanchandCache.data && now - alanchandCache.at < ALANCHAND_CACHE_TTL_MS) {
-    return alanchandCache.data;
+  if (yekrialCache.data && now - yekrialCache.at < YEKRIAL_CACHE_TTL_MS) {
+    return yekrialCache.data;
   }
 
-  const res = await fetch("https://alanchand.com/en/exchange-rates/usd-try", {
+  const res = await fetch("https://yekrial.com/", {
     headers: { "User-Agent": "Mozilla/5.0 (compatible; BuskitRateBot/1.0)" },
   });
-  if (!res.ok) throw new Error(`alanchand.com پاسخ HTTP ${res.status} داد`);
+  if (!res.ok) throw new Error(`yekrial.com پاسخ HTTP ${res.status} داد`);
   const html = await res.text();
 
-  const { usdToTry, usdToIrr } = extractAlanchandRates(html);
-  if (!usdToTry || !usdToIrr) {
-    throw new Error("alanchand.com: نرخ دلار/لیر یا دلار/ریال در صفحه پیدا نشد (شاید ساختار صفحه تغییر کرده)");
+  const usdToman = extractYekrialTomanPrice(html, "USD");
+  const tryToman = extractYekrialTomanPrice(html, "TRY");
+  if (!usdToman || !tryToman) {
+    throw new Error("yekrial.com: قیمت دلار یا لیر در صفحه پیدا نشد (شاید ساختار صفحه تغییر کرده)");
   }
 
-  const data = { usdToTry, usdToIrr };
-  alanchandCache = { at: now, data };
+  const data = {
+    usdToIrr: usdToman * 10, // تومان → ریال
+    usdToTry: usdToman / tryToman, // ۱ دلار = چند لیر
+  };
+  yekrialCache = { at: now, data };
   return data;
 }
 
-async function fetchUsdTryFromAlanchand() {
-  const { usdToTry } = await fetchRatesFromAlanchand();
+async function fetchUsdTryFromYekrial() {
+  const { usdToTry } = await fetchRatesFromYekrial();
   return usdToTry;
 }
-async function fetchUsdIrrFromAlanchand() {
-  const { usdToIrr } = await fetchRatesFromAlanchand();
+async function fetchUsdIrrFromYekrial() {
+  const { usdToIrr } = await fetchRatesFromYekrial();
   return usdToIrr;
 }
 
@@ -180,11 +140,8 @@ async function fetchUsdTryFromFrankfurter() {
   return rate;
 }
 
-// ── منبع ۲ و ۳ برای نرخ دلار/ریال بازار آزاد: bonbast و brsapi ─────────────
-// هر دو فعلاً از کار افتاده‌ن (bonbast.amirhn.com دیگه اصلاً resolve نمی‌شه؛
-// کلید رایگانِ مستندشدهٔ brsapi هم دیگه معتبر نیست) ولی به‌عنوان fallback
-// نگه داشته شدن — اگه یه روز دوباره سرپا شدن، خودکار دوباره استفاده می‌شن،
-// و تا اون موقع فقط سریع شکست می‌خورن و به منبع بعدی می‌رن.
+// ── منبع ۲ برای نرخ دلار/ریال بازار آزاد: bonbast ──────────────────────────
+// bonbast قیمت را به «تومان» می‌دهد؛ اینجا در ۱۰ ضرب می‌کنیم تا به ریال تبدیل شود.
 async function fetchUsdIrrFromBonbast() {
   const res = await fetch("https://bonbast.amirhn.com/latest");
   if (!res.ok) throw new Error(`bonbast پاسخ HTTP ${res.status} داد`);
@@ -196,6 +153,7 @@ async function fetchUsdIrrFromBonbast() {
   return toman * 10; // تومان → ریال
 }
 
+// ── منبع ۳ برای نرخ دلار/ریال بازار آزاد: brsapi (رایگان) ─────────────────
 async function fetchUsdIrrFromBrsApi() {
   const res = await fetch("https://BrsApi.ir/FreeTsetmcBourseApi/Api_Free_Gold_Currency_v2.json");
   if (!res.ok) throw new Error(`brsapi پاسخ HTTP ${res.status} داد`);
@@ -210,12 +168,12 @@ async function fetchUsdIrrFromBrsApi() {
 }
 
 const USD_TRY_SOURCES = [
-  { name: "alanchand.com", fn: fetchUsdTryFromAlanchand },
+  { name: "yekrial.com", fn: fetchUsdTryFromYekrial },
   { name: "doviz.com", fn: fetchUsdTryFromDovizCom },
   { name: "Frankfurter", fn: fetchUsdTryFromFrankfurter },
 ];
 const USD_IRR_SOURCES = [
-  { name: "alanchand.com", fn: fetchUsdIrrFromAlanchand },
+  { name: "yekrial.com", fn: fetchUsdIrrFromYekrial },
   { name: "bonbast", fn: fetchUsdIrrFromBonbast },
   { name: "brsapi", fn: fetchUsdIrrFromBrsApi },
 ];
@@ -373,6 +331,13 @@ initRatesSystem();
 // ── کلید خصوصی ───────────────────────────────────────────────────────────
 const privateKey = process.env.PRIVATE_KEY.replace(/\\n/g, "\n");
 
+// ── توکن دسترسی مایکت (X-Access-Token) ─────────────────────────────────
+// از پنل توسعه‌دهندگان مایکت → بخش محصولات درون‌برنامه‌ای → «توکن
+// صحت‌سنجی» گرفته می‌شه. فقط سمت سرور استفاده می‌شه (هیچ‌وقت به کلاینت
+// فرستاده نمی‌شه) چون هرکسی که این توکن رو داشته باشه می‌تونه محصولات
+// رو دستکاری کنه یا وضعیت خریدها رو بخونه.
+const MYKET_ACCESS_TOKEN = process.env.MYKET_ACCESS_TOKEN;
+
 // ── سرویس ایمیل (Brevo — از طریق HTTP API، نه SMTP) ──────────────────────
 // چرا Brevo به‌جای Gmail SMTP: Render (پلن رایگان) پورت‌های خروجی SMTP
 // (۲۵/۴۶۵/۵۸۷) رو کاملاً مسدود می‌کنه — این یک محدودیت شناخته‌شده‌ی خودِ
@@ -411,17 +376,10 @@ app.use(
 );
 
 // ── body parser ──────────────────────────────────────────────────────────
-// نکته‌ی مهم: مسیرهای وبهوکِ درگاه‌های پرداخت باید body رو به‌صورت خام (raw
-// buffer) دریافت کنن، چون در حالتی که امضای HMAC هم لازم باشه، امضا روی
-// همون بایت‌های خامِ ارسالی محاسبه می‌شه، نه روی JSON.stringify شده‌ی
-// دوباره. برای همین این مسیرها رو از express.json() عمومی مستثنی می‌کنیم و
-// خودشون پایین‌تر express.raw() جداگانه می‌گیرن.
-// ⚠️ TODO_VERIFY: مسیر /webhooks/payoneer با فرض احراز هویت Basic
-// Auth نوشته شده (ساده‌ترین و رایج‌ترین حالت برای این خانواده از APIهای
-// Optile/Payoneer Checkout)، که نیازی به raw body ندارد — اما اگه توی پنل
-// Payoneer دیدید که یک هدر امضا (مثلاً X-Payoneer-Signature) هم می‌فرسته،
-// حتماً این مسیر رو هم مثل lemonsqueezy به express.raw() ببرید و امضا رو
-// روی raw body چک کنید، نه روی body پارس‌شده.
+// نکته‌ی مهم: مسیر وبهوک Lemon Squeezy باید body رو به‌صورت خام (raw buffer)
+// دریافت کنه، چون امضای HMAC روی همون بایت‌های خامِ ارسالی محاسبه می‌شه، نه
+// روی JSON.stringify شده‌ی دوباره. برای همین این مسیر رو از express.json()
+// عمومی مستثنی می‌کنیم و خودش پایین‌تر express.raw() جداگانه می‌گیره.
 app.use((req, res, next) => {
   if (req.originalUrl === "/webhooks/lemonsqueezy") {
     return next();
@@ -638,61 +596,14 @@ const LS_VARIANT_LICENSE_MAP = {
   2059669: { tier: "gold", license_type: "lifetime", appGeneration: "v1" },
 };
 
-// ── نگاشت مرجع سفارش Payoneer Checkout → سطح و مدت لایسنس ────────────────
-// برخلاف Lemon Squeezy که یک variant_id ثابت روی محصول داشبوردش بود،
-// Payoneer Checkout معمولاً یک «مرجع سفارش» (merchant reference / order
-// id) رو خودِ سرور شما موقع ساخت صفحه‌ی پرداخت تعیین می‌کنه (یا اگه لینک
-// پرداخت ثابت از پنل دارید، همون لینک یک کد ثابت داره که می‌تونید توی
-// تنظیمات آن لینک یک reference دلخواه برایش بگذارید). پس این مقدار رو با
-// همون رشته‌ای که خودتان برای این محصول (لایسنس مادام‌العمر) انتخاب
-// می‌کنید عوض کنید — مثلاً "buskit-lifetime". این نگاشت عمداً سمت سرور
-// نگه داشته می‌شه (نه چیزی که از payload وبهوک خونده بشه)، تا کسی نتونه
-// با جعل payload لایسنس مجانی بگیره.
-const PAYONEER_REFERENCE_LICENSE_MAP = {
-  "buskit-lifetime": { tier: "gold", license_type: "lifetime", appGeneration: "v1" },
+// ── نگاشت skuId مایکت → سطح و مدت لایسنس ──────────────────────────────
+// دقیقاً معادل LS_VARIANT_LICENSE_MAP بالا، ولی برای محصولات مایکت. کلید
+// این آبجکت باید حرف‌به‌حرف همون skuId‌ای باشه که توی پنل توسعه‌دهندگان
+// مایکت ساختی (و همون چیزی که کلاینت در MYKET_SKU_LIFETIME می‌فرسته).
+// عمداً سمت سرور نگه داشته می‌شه، نه چیزی که از body درخواست خونده بشه.
+const MYKET_SKU_LICENSE_MAP = {
+  buskit_lifetime: { tier: "gold", license_type: "lifetime", appGeneration: "v1" },
 };
-
-// ── احراز هویت وبهوک Payoneer Checkout ────────────────────────────────────
-// ⚠️ TODO_VERIFY: این تابع بر اساس رایج‌ترین مدل احراز هویتِ این خانواده از
-// APIها (Optile/Payoneer Checkout) نوشته شده: شما توی پنل Payoneer، بخش
-// Checkout → Integration → API access (یا معادلش برای notification URL)
-// یک username/password یا token تنظیم می‌کنید؛ Payoneer همون‌ها رو به‌صورت
-// HTTP Basic Auth روی هدر Authorization هر وبهوک می‌فرسته. من نتوانستم
-// مستقیماً صفحه‌ی رسمی وبهوک Payoneer را باز کنم (دسترسی برایم مسدود بود)،
-// پس این را حتماً یک بار با یک پرداخت تستی/Sandbox چک کنید: اگر واقعاً
-// Authorization: Basic ... می‌آید همین تابع کافیست؛ اگر به‌جایش یک هدر
-// امضا (مثل X-Payoneer-Signature) دیدید، این تابع را با HMAC (شبیه تابع
-// وبهوک Lemon Squeezy بالاتر) جایگزین کنید.
-function verifyPayoneerNotification(req) {
-  const authHeader = req.headers["authorization"] || "";
-  if (!authHeader.startsWith("Basic ")) return false;
-
-  const decoded = Buffer.from(authHeader.slice(6), "base64").toString("utf8");
-  const separatorIndex = decoded.indexOf(":");
-  if (separatorIndex === -1) return false;
-
-  const user = decoded.slice(0, separatorIndex);
-  const pass = decoded.slice(separatorIndex + 1);
-
-  const expectedUser = process.env.PAYONEER_NOTIFICATION_USER || "";
-  const expectedPass = process.env.PAYONEER_NOTIFICATION_PASS || "";
-  if (!expectedUser || !expectedPass) return false;
-
-  // constant-time compare تا از timing attack جلوگیری شه
-  const userBuf = Buffer.from(user);
-  const expectedUserBuf = Buffer.from(expectedUser);
-  const passBuf = Buffer.from(pass);
-  const expectedPassBuf = Buffer.from(expectedPass);
-
-  const userMatches =
-    userBuf.length === expectedUserBuf.length &&
-    crypto.timingSafeEqual(userBuf, expectedUserBuf);
-  const passMatches =
-    passBuf.length === expectedPassBuf.length &&
-    crypto.timingSafeEqual(passBuf, expectedPassBuf);
-
-  return userMatches && passMatches;
-}
 
 // ── کد سیستمیِ «بدون کد تخفیف» ────────────────────────────────────────────
 // هر سفارشی که هیچ کد تخفیفِ واقعی روش اعمال نشده (یا مشتری اصلاً کدی وارد
@@ -713,8 +624,7 @@ function generateLicenseCode() {
   return code;
 }
 
-// ── ارسال ایمیل حاوی کد لایسنس به خریدار (بعد از تایید پرداخت — مستقل از
-// درگاه، همین تابع برای Lemon Squeezy و Payoneer هردو صدا زده می‌شه) ──────
+// ── ارسال ایمیل حاوی کد لایسنس به خریدار (بعد از تایید پرداخت Lemon Squeezy) ──
 async function sendLicenseEmail(email, name, licenseCode) {
   const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
   sendSmtpEmail.sender = {
@@ -1017,9 +927,6 @@ app.post("/request-probation-license", async (req, res) => {
       });
 
     let emailSent = true;
-    const now = new Date().toLocaleString("fa-IR", {
-      timeZone: "Europe/Istanbul",
-    });
     try {
       await sendProbationLicenseEmail(
         cleanEmail,
@@ -1034,30 +941,9 @@ app.post("/request-probation-license", async (req, res) => {
           delivered: true,
           deliveredAt: admin.firestore.FieldValue.serverTimestamp(),
         });
-
-      notifyWhatsapp(
-        `📩 لایسنس جدید صادر شد\n` +
-          `منبع خرید: Probation (آزمایشی رایگان)\n` +
-          `نام: ${cleanName}\n` +
-          `ایمیل: ${cleanEmail}\n` +
-          `واتس‌آپ خریدار: ${cleanWhatsapp}\n` +
-          `کد لایسنس: ${licenseCode}\n` +
-          `تاریخ/ساعت: ${now}`,
-      );
     } catch (mailErr) {
       emailSent = false;
       console.error("خطا در ارسال ایمیل لایسنس probation:", mailErr);
-
-      notifyWhatsapp(
-        `⚠️ لایسنس صادر شد ولی ایمیل ارسال نشد\n` +
-          `منبع خرید: Probation (آزمایشی رایگان)\n` +
-          `نام: ${cleanName}\n` +
-          `ایمیل: ${cleanEmail}\n` +
-          `واتس‌آپ خریدار: ${cleanWhatsapp}\n` +
-          `کد لایسنس: ${licenseCode}\n` +
-          `تاریخ/ساعت: ${now}\n` +
-          `خطا: ${mailErr.message || mailErr}`,
-      );
     }
 
     // ثبت درخواست برای پنل ادمین (همان کالکشنی که قبلاً سایت خودش می‌نوشت)
@@ -1409,36 +1295,15 @@ app.post(
 
       // اگه وبهوک تکراری بود، دیگه دوباره ایمیل نفرست
       if (!created.alreadyProcessed) {
-        const now = new Date().toLocaleString("fa-IR", {
-          timeZone: "Europe/Istanbul",
-        });
         try {
           await sendLicenseEmail(email, name, created.licenseCode);
           await db.collection("licenses").doc(created.licenseCode).update({
             delivered: true,
           });
-          notifyWhatsapp(
-            `💰 لایسنس خریداری‌شده صادر شد\n` +
-              `منبع خرید: Lemon Squeezy\n` +
-              `نام: ${name}\n` +
-              `ایمیل: ${email}\n` +
-              `تیر: ${info.tier}\n` +
-              `کد لایسنس: ${created.licenseCode}\n` +
-              `تاریخ/ساعت: ${now}`,
-          );
         } catch (mailErr) {
           // اگه ایمیل fail بشه، لایسنس همچنان توی Firestore ساخته شده و
           // delivered:false می‌مونه — می‌تونی بعداً از پنل ادمین دستی بفرستیش
           console.error("خطا در ارسال ایمیل لایسنس:", mailErr);
-          notifyWhatsapp(
-            `⚠️ لایسنس خریداری‌شده صادر شد ولی ایمیل ارسال نشد\n` +
-              `منبع خرید: Lemon Squeezy\n` +
-              `نام: ${name}\n` +
-              `ایمیل: ${email}\n` +
-              `کد لایسنس: ${created.licenseCode}\n` +
-              `تاریخ/ساعت: ${now}\n` +
-              `خطا: ${mailErr.message || mailErr}`,
-          );
         }
       }
 
@@ -1453,187 +1318,161 @@ app.post(
 );
 
 // ════════════════════════════════════════════════════════════════════════
-//  وبهوک Payoneer Checkout → ساخت خودکار لایسنس + ایمیل به خریدار
+//  تایید خرید مایکت → ساخت خودکار و فعال‌سازی فوری لایسنس
 // ════════════════════════════════════════════════════════════════════════
-// جایگزین همون منطقِ وبهوک Lemon Squeezy بالا، برای Payoneer Checkout.
-// جریان کار:
-//   ۱) احراز هویت درخواست (فعلاً Basic Auth — به کامنت verifyPayoneerNotification
-//      نگاه کن، این بخش باید با یک تست واقعی تایید شه).
-//   ۲) فقط رویدادِ «پرداخت موفق» رو پردازش می‌کنیم.
-//   ۳) مرجع سفارش (reference) رو از PAYONEER_REFERENCE_LICENSE_MAP (نگاشتِ
-//      امنِ سمت سرور، نه چیزی که از payload خونده بشه) به tier/duration
-//      تبدیل می‌کنیم.
-//   ۴) با یک تراکنش، هم سند لایسنس جدید (is_used:false) می‌سازیم هم سند
-//      payoneerOrders/{orderId} رو برای idempotency (چون خیلی از این
-//      درگاه‌ها ممکنه همون وبهوک رو بیشتر از یک‌بار retry کنن).
-//   ۵) کد لایسنس رو با ایمیل به خریدار می‌فرستیم (از همون sendLicenseEmail
-//      قبلی، که مستقل از درگاه پرداخته).
-// توجه: این مسیر باید همیشه (حتی وقتی خطای داخلی داریم و لاگ می‌کنیم) با
-// status نزدیک به 200 جواب بده وگرنه Payoneer مدام retry می‌کنه؛ فقط برای
-// احراز هویت نامعتبر 401 برمی‌گردونیم چون اونجا واقعاً می‌خوایم رد کنیم.
-//
-// ⚠️ TODO_VERIFY (مهم): فیلدهای زیر (orderId/status/reference/email/name)
-// بر اساس ساختار عمومیِ رایج در این خانواده از APIها (Optile/Payoneer
-// Checkout) تخمین زده شده‌ن، نه از مستندات رسمی که من نتونستم بازش کنم.
-// حتماً قبل از رفتن به Production، یک پرداخت تستی (Sandbox) بزنید، payload
-// واقعی وبهوک رو لاگ کنید (یک console.log(JSON.stringify(payload)) موقت
-// همین زیر کافیه)، و اسم فیلدهای واقعی رو با آنچه در extractPayoneerFields
-// پایین‌تر خوانده می‌شه مقایسه/اصلاح کنید.
-function extractPayoneerFields(payload) {
-  // چند حالتِ محتمل رو امتحان می‌کنیم (fail-safe)، دقیقاً مثل الگوی
-  // fetchUsd... بالاتر که چند فیلد جایگزین رو با ?? امتحان می‌کنه.
-  const txn = payload?.transaction || payload;
+// برخلاف Lemon Squeezy، مایکت وبهوک نمی‌فرسته. به‌جاش، بعد از این‌که کاربر
+// توی خود اپ خرید رو انجام داد، اپ purchaseToken گرفته‌شده رو به همین مسیر
+// می‌فرسته. جریان کار:
+//   ۱) skuId رو از MYKET_SKU_LICENSE_MAP (نگاشتِ امنِ سمت سرور) به
+//      tier/duration تبدیل می‌کنیم — اگه sku ناشناخته بود، رد می‌کنیم.
+//   ۲) با یک تراکنش، چک می‌کنیم این purchaseToken قبلاً پردازش نشده باشه
+//      (idempotency — هم برای جلوگیری از retry تصادفی کلاینت، هم برای
+//      جلوگیری از استفاده‌ی دوباره از یک توکن قدیمی).
+//   ۳) از سرور (نه کلاینت) به Myket Purchase Verify API وصل می‌شیم و
+//      purchaseState رو چک می‌کنیم — طبق مستندات مایکت 0 یعنی موفق.
+//   ۴) در صورت موفقیت، بلافاصله لایسنس مادام‌العمر می‌سازیم، به همین
+//      fingerprint/appId (که از developerPayload خرید اومده) گره می‌زنیم،
+//      و یک توکن امضاشده برمی‌گردونیم — دقیقاً همون ساختار پاسخ /activate.
+app.post("/myket/verify-purchase", async (req, res) => {
+  try {
+    const {
+      purchaseToken,
+      skuId,
+      fingerprint,
+      appId,
+      hardwareSignature,
+      appGeneration,
+    } = req.body;
 
-  const orderId =
-    txn?.transactionId || txn?.longId || payload?.longId || payload?.id;
+    if (!purchaseToken || !skuId || !fingerprint || !appId) {
+      return res.status(400).json({
+        success: false,
+        error: "purchaseToken, skuId, fingerprint and appId are required",
+      });
+    }
 
-  const status =
-    txn?.payment?.status ||
-    txn?.status ||
-    payload?.status ||
-    payload?.transactionStatus;
+    if (!isValidAppId(appId)) {
+      return res.status(400).json({ success: false, error: "Unknown appId" });
+    }
 
-  const reference =
-    txn?.merchantTransactionId ||
-    txn?.reference ||
-    payload?.reference ||
-    payload?.merchantReference;
+    const info = MYKET_SKU_LICENSE_MAP[skuId];
+    if (!info) {
+      console.error(`مایکت: skuId ناشناخته (${skuId})`);
+      return res.status(400).json({ success: false, error: "Unknown product" });
+    }
 
-  const email =
-    txn?.customer?.email ||
-    payload?.customer?.email ||
-    payload?.email;
+    if (!MYKET_ACCESS_TOKEN) {
+      console.error("مایکت: متغیر محیطی MYKET_ACCESS_TOKEN تنظیم نشده");
+      return res.status(500).json({ success: false, error: "Server misconfigured" });
+    }
 
-  const name =
-    [txn?.customer?.firstName, txn?.customer?.lastName]
-      .filter(Boolean)
-      .join(" ") ||
-    payload?.customer?.name ||
-    "";
+    // ── idempotency: این purchaseToken قبلاً پردازش شده؟ ─────────────
+    // (چه به‌خاطر retry شبکه‌ای کلاینت، چه سوءاستفاده‌ی عمدی از یک توکن قدیمی)
+    const purchaseRef = db.collection("myketPurchases").doc(purchaseToken);
+    const existingPurchase = await purchaseRef.get();
+    if (existingPurchase.exists) {
+      const prev = existingPurchase.data();
+      const token = createSignedToken(
+        prev.fingerprint,
+        prev.appId,
+        prev.licenseCode,
+        prev.licenseType,
+        null,
+        prev.tier,
+      );
+      return res.status(200).json({
+        success: true,
+        token,
+        licenseType: prev.licenseType,
+        tier: prev.tier,
+        licenseCode: prev.licenseCode,
+        expiresAt: null,
+      });
+    }
 
-  return { orderId, status, reference, email, name };
-}
-
-app.post(
-  "/webhooks/payoneer",
-  async (req, res) => {
+    // ── صحت‌سنجی خرید با سرور مایکت (server-to-server) ───────────────
+    let myketData;
     try {
-      if (!verifyPayoneerNotification(req)) {
-        return res.status(401).json({ error: "invalid authentication" });
-      }
-
-      const payload = req.body;
-
-      // برای پیدا کردن اسم واقعی فیلدها در اولین تست Sandbox، این خط رو
-      // موقتاً از کامنت خارج کن:
-      // console.log("Payoneer webhook payload:", JSON.stringify(payload));
-
-      const { orderId, status, reference, email, name } =
-        extractPayoneerFields(payload);
-
-      // فقط رویداد پرداخت موفق رو پردازش می‌کنیم؛ بقیه (pending/failed/...)
-      // رو نادیده می‌گیریم.
-      const successStatuses = ["SUCCESS", "CAPTURED", "CHARGED", "PAID"];
-      if (!status || !successStatuses.includes(String(status).toUpperCase())) {
-        return res.status(200).json({ ok: true, ignored: status || "unknown" });
-      }
-
-      if (!orderId || !email) {
-        console.error(
-          `وبهوک Payoneer با ساختار نامعتبر (orderId=${orderId}, email=${email}):`,
-          payload,
-        );
-        return res.status(200).json({ ok: true });
-      }
-
-      const info = PAYONEER_REFERENCE_LICENSE_MAP[reference];
-      if (!info) {
-        console.error(
-          `وبهوک Payoneer: reference ناشناخته (reference=${reference}, order=${orderId})`,
-        );
-        return res.status(200).json({ ok: true });
-      }
-
-      const licenseCode = generateLicenseCode();
-      const orderRef = db.collection("payoneerOrders").doc(String(orderId));
-
-      const created = await db.runTransaction(async (tx) => {
-        const existing = await tx.get(orderRef);
-        if (existing.exists) {
-          // این orderId قبلاً پردازش شده (وبهوک تکراری) — چیزی نساز
-          return { alreadyProcessed: true, licenseCode: existing.data().licenseCode };
-        }
-
-        tx.set(db.collection("licenses").doc(licenseCode), {
-          tier: info.tier,
-          license_type: info.license_type,
-          appGeneration: info.appGeneration || CURRENT_APP_GENERATION,
-          is_shared: false,
-          is_used: false,
-          name,
-          email,
-          source: "payoneer",
-          payoneer_order_id: String(orderId),
-          delivered: false,
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      const verifyUrl = `https://developer.myket.ir/api/partners/applications/${encodeURIComponent(
+        appId,
+      )}/purchases/products/${encodeURIComponent(skuId)}/verify`;
+      const myketRes = await fetch(verifyUrl, {
+        method: "POST",
+        headers: {
+          "X-Access-Token": MYKET_ACCESS_TOKEN,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ tokenId: purchaseToken }),
+      });
+      myketData = await myketRes.json();
+      if (!myketRes.ok) {
+        console.error("مایکت: خطای verify API:", myketData);
+        return res.status(502).json({
+          success: false,
+          error: myketData?.translatedMessage || "Purchase verification failed",
         });
+      }
+    } catch (err) {
+      console.error("مایکت: خطا در اتصال به verify API:", err);
+      return res.status(502).json({ success: false, error: "Could not reach Myket" });
+    }
 
-        tx.set(orderRef, {
-          email,
-          name,
-          licenseCode,
-          tier: info.tier,
-          licenseType: info.license_type,
-          processedAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
+    // طبق مستندات مایکت: purchaseState === 0 یعنی خرید موفق
+    if (myketData.purchaseState !== 0) {
+      return res.status(403).json({ success: false, error: "Purchase not successful" });
+    }
 
-        return { alreadyProcessed: false, licenseCode };
+    // ── ساخت لایسنس + ثبت idempotency، هر دو در یک تراکنش ─────────────
+    const licenseCode = generateLicenseCode();
+    const tier = info.tier;
+    const licenseType = info.license_type;
+
+    await db.runTransaction(async (tx) => {
+      tx.set(db.collection("licenses").doc(licenseCode), {
+        tier,
+        license_type: licenseType,
+        appGeneration: info.appGeneration || CURRENT_APP_GENERATION,
+        is_shared: false,
+        is_used: true,
+        fingerprint,
+        appId,
+        hardwareSignature: hardwareSignature || null,
+        source: "myket",
+        myket_sku_id: skuId,
+        myket_purchase_token: purchaseToken,
+        activated_at: admin.firestore.FieldValue.serverTimestamp(),
+        expires_at: null, // فقط lifetime می‌فروشیم
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
-      // اگه وبهوک تکراری بود، دیگه دوباره ایمیل نفرست
-      if (!created.alreadyProcessed) {
-        const now = new Date().toLocaleString("fa-IR", {
-          timeZone: "Europe/Istanbul",
-        });
-        try {
-          await sendLicenseEmail(email, name, created.licenseCode);
-          await db.collection("licenses").doc(created.licenseCode).update({
-            delivered: true,
-          });
-          notifyWhatsapp(
-            `💰 لایسنس خریداری‌شده صادر شد\n` +
-              `منبع خرید: Payoneer\n` +
-              `نام: ${name}\n` +
-              `ایمیل: ${email}\n` +
-              `تیر: ${info.tier}\n` +
-              `کد لایسنس: ${created.licenseCode}\n` +
-              `تاریخ/ساعت: ${now}`,
-          );
-        } catch (mailErr) {
-          // اگه ایمیل fail بشه، لایسنس همچنان توی Firestore ساخته شده و
-          // delivered:false می‌مونه — می‌تونی بعداً از پنل ادمین دستی بفرستیش
-          console.error("خطا در ارسال ایمیل لایسنس:", mailErr);
-          notifyWhatsapp(
-            `⚠️ لایسنس خریداری‌شده صادر شد ولی ایمیل ارسال نشد\n` +
-              `منبع خرید: Payoneer\n` +
-              `نام: ${name}\n` +
-              `ایمیل: ${email}\n` +
-              `کد لایسنس: ${created.licenseCode}\n` +
-              `تاریخ/ساعت: ${now}\n` +
-              `خطا: ${mailErr.message || mailErr}`,
-          );
-        }
-      }
+      tx.set(purchaseRef, {
+        skuId,
+        fingerprint,
+        appId,
+        licenseCode,
+        licenseType,
+        tier,
+        processedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    });
 
-      return res.status(200).json({ ok: true });
-    } catch (err) {
-      console.error("خطا در وبهوک Payoneer:", err);
-      // 200 برمی‌گردونیم تا Payoneer بی‌نهایت retry نکنه؛ خطا لاگ شده و از
-      // پنل ادمین/لاگ‌ها قابل پیگیریه
-      return res.status(200).json({ ok: false });
-    }
-  },
-);
+    await linkDevice(fingerprint, appId, licenseType, licenseCode, appGeneration);
+
+    const token = createSignedToken(fingerprint, appId, licenseCode, licenseType, null, tier);
+
+    return res.status(200).json({
+      success: true,
+      token,
+      licenseType,
+      tier,
+      licenseCode,
+      expiresAt: null,
+    });
+  } catch (err) {
+    console.error("خطا در تایید خرید مایکت:", err);
+    return res.status(500).json({ success: false, error: "Server error" });
+  }
+});
 
 // ── مسیر فعال‌سازی (ساین‌آپ - وقتی کاربر کد لایسنس رو دستی وارد می‌کنه) ──
 app.post("/activate", async (req, res) => {
@@ -2382,60 +2221,6 @@ app.get("/rates/latest", (req, res) => {
         ? latestRates.usdToIrr / latestRates.usdToTry
         : null,
   });
-});
-
-// ── مسیر موقت دیباگ (بدون نیاز به Shell) — برای دیدن اینکه از شبکه‌ی همین
-// سرور Render واقعاً چه پاسخی از منبع‌های نرخ ریال می‌گیریم. فقط GET، بدون
-// نیاز به توکن، چون هیچ داده‌ی حساسی برنمی‌گردونه و برای موقتی‌ست.
-// بعد از رفع مشکل حتماً این بلوک حذف بشه.
-// نمونه استفاده (مستقیم توی مرورگر باز کن):
-//   https://<آدرس-سرور-شما>/debug/probe?source=brsapi
-//   https://<آدرس-سرور-شما>/debug/probe?source=bonbast
-//   https://<آدرس-سرور-شما>/debug/probe?source=yekrial
-//   https://<آدرس-سرور-شما>/debug/probe?source=doviz
-const DEBUG_PROBE_URLS = {
-  brsapi:
-    "https://Api.BrsApi.ir/Market/Gold_Currency_Pro.php?key=FreeSV0E1LSgB9RDjuf0QorSLViX8pPG&symbol=USD",
-  bonbast: "https://bonbast.amirhn.com/latest",
-  yekrial: "https://yekrial.com/toman-rate/USD",
-  doviz: "https://www.doviz.com/api/v1/currencies/all/latest",
-  alanchand: "https://alanchand.com/en/exchange-rates/usd-try",
-};
-app.get("/debug/probe", async (req, res) => {
-  const key = (req.query.source || "").toString();
-  const url = DEBUG_PROBE_URLS[key];
-  if (!url) {
-    return res.status(400).json({
-      status: "error",
-      error: `پارامتر source نامعتبر یا خالی؛ یکی از این‌ها رو بده: ${Object.keys(DEBUG_PROBE_URLS).join(", ")}`,
-    });
-  }
-  const startedAt = Date.now();
-  try {
-    const r = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; BuskitRateBot/1.0)" },
-    });
-    const text = await r.text();
-    return res.status(200).json({
-      status: "ok",
-      source: key,
-      url,
-      httpStatus: r.status,
-      httpStatusText: r.statusText,
-      ms: Date.now() - startedAt,
-      bodyPreview: text.slice(0, 3000),
-      bodyLength: text.length,
-    });
-  } catch (err) {
-    return res.status(200).json({
-      status: "error",
-      source: key,
-      url,
-      ms: Date.now() - startedAt,
-      error: err.message,
-      errorCause: err.cause ? String(err.cause) : null,
-    });
-  }
 });
 
 // ── واداشتن سرور به گرفتن فوری نرخ‌ها (فقط ادمین) — برای تست ─────────────
