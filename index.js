@@ -1391,6 +1391,10 @@ app.post("/myket/verify-purchase", async (req, res) => {
     }
 
     // ── صحت‌سنجی خرید با سرور مایکت (server-to-server) ───────────────
+    // طبق مستندات رسمی و به‌روز مایکت (myket.ir/kb/pages/server-to-server-payment-validation-api):
+    // POST با body شامل tokenId — نسخه‌ی قدیمی/انگلیسی مستندات که قبلاً بهش
+    // استناد شده بود (GET .../tokens/{TOKEN}) منسوخ بوده؛ این همون فرمتیه که
+    // از اول اینجا بود.
     let myketData;
     try {
       const verifyUrl = `https://developer.myket.ir/api/partners/applications/${encodeURIComponent(
