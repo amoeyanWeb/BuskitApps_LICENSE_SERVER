@@ -410,13 +410,13 @@ const LICENSE_DURATIONS = {
 const DURATION_ORDER = ["lifetime", "5days", "probation"];
 
 // ── appId های مجاز ────────────────────────────────────────────────────────
-// لیست application id های سه اپ. اگه appId ارسالی توی این لیست نباشه
+// فعلاً فقط همین یک اپ (Buskit-Tools) واقعاً روی سرور کار می‌کنه؛ دو تای
+// دیگه (LiveFX/LiveTools) هنوز منتشر نشدن یا applicationId واقعیشون معلوم
+// نیست، برای همین از لیست حذف شدن تا هیچ appId جعلی/اشتباهی به‌جاشون رد
+// نشه. هروقت اون دو اپ هم واقعاً آماده شدن، applicationId درستشون رو
+// دوباره به همین آرایه اضافه کن. اگه appId ارسالی توی این لیست نباشه
 // درخواست رد میشه (جلوی سوءاستفاده با appId جعلی رو هم می‌گیره).
-const ALLOWED_APP_IDS = [
-  "com.BuskitApp.LiveFX",
-  "com.BuskitApp.Tools", // ← application id واقعی اپ دوم رو اینجا بذار
-  "com.BuskitApp.LiveTools", // ← application id واقعی اپ سوم رو اینجا بذار
-];
+const ALLOWED_APP_IDS = ["com.BuskitApp.Tools"];
 
 // ── fingerprint رو برای Firestore document ID ایمن کن ────────────────────
 function toSafeId(fingerprint) {
@@ -859,33 +859,58 @@ async function sendProbationLicenseEmail(email, name, licenseCode, lang) {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  🎫 صدور فوری لایسنس probation از فرم سایت («ثبت و دریافت لایسنس»)
+//  🎫 صدور فوری لایسنس probation از فرم سایت («ثبت و دریافت لایسنس») یا
+//     از دکمه‌ی «Get 2-day FREE license» داخل اپ اندروید
 // ════════════════════════════════════════════════════════════════════════
 // جریان کار:
-//   ۱) نام/ایمیل/واتس‌اپ را از فرم سایت می‌گیرد.
+//   ۱) نام/ایمیل (و اختیاراً واتس‌اپ/زبان/پلتفرم) را از فرم سایت یا اپ می‌گیرد.
 //   ۲) چک می‌کند که همین ایمیل قبلاً یک لایسنس probation نگرفته باشد (تا
 //      کسی با زدنِ پی‌درپی دکمه، ده‌ها کد رایگان نسازد). سقف اصلی و
 //      غیرقابل‌دورزدن همچنان در /activate است (hadProbationLicense روی سند
 //      دستگاه) — این‌جا فقط جلوی ساختِ سندهای زائد را می‌گیریم.
 //   ۳) یک سند در licenses با license_type:"probation" می‌سازد.
-//   ۴) کد را فوراً با ایمیل (به زبان انتخاب‌شده در سایت) می‌فرستد.
+//   ۴) کد را فوراً با ایمیل (به زبان انتخاب‌شده در سایت/اپ) می‌فرستد.
 //   ۵) یک سند در licenseRequests هم برای پنل ادمین ثبت می‌کند.
 // نکته: expires_at این‌جا ست نمی‌شود؛ شمارش ۲ روز از لحظه‌ی فعال‌سازی روی
 // گوشی در /activate شروع می‌شود (LICENSE_DURATIONS.probation).
+//
+// ── فرق سایت با اپ (فیلد platform) ────────────────────────────────────
+// روی سایت (platform ارسال نمی‌شود) رفتار قبلی عیناً حفظ شده: کد لایسنس
+// در پاسخ HTTP برگردانده نمی‌شود و کاربر باید ایمیلش را چک کند. اما در اپ
+// اندروید (ActivationActivity → دکمه‌ی "Get 2-day FREE license") باید کد
+// همان لحظه در یک دیالوگ نشان داده شود، پس وقتی platform==="app" باشد،
+// licenseCode هم در پاسخ برگردانده می‌شود (علاوه بر ارسال ایمیل، نه
+// به‌جای آن) — حتی اگر ارسال ایمیل شکست بخورد، چون در اپ خودِ نمایش کد
+// کانال اصلی تحویل است، نه ایمیل.
 app.post("/request-probation-license", async (req, res) => {
   try {
-    const { name, email, whatsapp, lang } = req.body || {};
+    const { name, email, whatsapp, lang, platform, fingerprint, appId } =
+      req.body || {};
 
     const cleanName = typeof name === "string" ? name.trim() : "";
     const cleanEmail =
       typeof email === "string" ? email.trim().toLowerCase() : "";
     const cleanWhatsapp = typeof whatsapp === "string" ? whatsapp.trim() : "";
     const safeLang = ["fa", "en", "tr", "de"].includes(lang) ? lang : "en";
+    const isAppRequest =
+      typeof platform === "string" && platform.trim().toLowerCase() === "app";
+    const cleanFingerprint =
+      typeof fingerprint === "string" && fingerprint.trim()
+        ? fingerprint.trim()
+        : null;
+    const cleanAppId =
+      typeof appId === "string" && appId.trim() ? appId.trim() : null;
 
     if (!cleanName || !cleanEmail || !/^\S+@\S+\.\S+$/.test(cleanEmail)) {
       return res
         .status(400)
         .json({ success: false, error: "invalid-input" });
+    }
+
+    // اگه appId فرستاده شده (فعلاً فقط اپ اندروید این کار رو می‌کنه)، باید
+    // یکی از سه اپ واقعی باشه — جلوی appId جعلی رو می‌گیره.
+    if (cleanAppId && !isValidAppId(cleanAppId)) {
+      return res.status(400).json({ success: false, error: "invalid-appId" });
     }
 
     // ── یک ایمیل = یک لایسنس probation ──────────────────────────────────
@@ -921,7 +946,10 @@ app.post("/request-probation-license", async (req, res) => {
         lang: safeLang,
         priceUsd: PROBATION_PRICE_USD,
         paid: false, // بعد از دریافت سند واریزی، دستی true کنید
-        source: "website-probation",
+        source: isAppRequest ? "app-probation" : "website-probation",
+        // فقط برای گزارش‌گیری/دیباگ — در تصمیم‌گیری /activate استفاده نمی‌شن
+        requestFingerprint: cleanFingerprint,
+        requestAppId: cleanAppId,
         delivered: false, // پایین‌تر، بعد از ارسال موفق ایمیل، true می‌شود
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
@@ -957,15 +985,24 @@ app.post("/request-probation-license", async (req, res) => {
         license_type: "probation",
         license_sent: emailSent,
         paid: false,
+        source: isAppRequest ? "app-probation" : "website-probation",
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
     } catch (reqErr) {
       console.error("خطا در ثبت licenseRequests:", reqErr);
     }
 
-    // اگر ایمیل نرفت، به کاربر می‌گوییم که با پشتیبانی تماس بگیرد — کد
-    // لایسنس را عمداً در پاسخ HTTP برنمی‌گردانیم تا فقط از راه ایمیل
-    // تحویل داده شود.
+    // ── اپ اندروید: کد را همیشه در پاسخ برمی‌گردانیم (چه ایمیل رفته باشد
+    // چه نه)، چون در اپ خودِ دیالوگ کانال اصلی تحویل کد است.
+    if (isAppRequest) {
+      return res
+        .status(200)
+        .json({ success: true, licenseCode, emailSent });
+    }
+
+    // ── سایت: رفتار قبلی دست‌نخورده — اگر ایمیل نرفت، به کاربر می‌گوییم که
+    // با پشتیبانی تماس بگیرد. کد لایسنس را عمداً در پاسخ HTTP برنمی‌گردانیم
+    // تا فقط از راه ایمیل تحویل داده شود.
     if (!emailSent) {
       return res.status(502).json({ success: false, error: "email-failed" });
     }
