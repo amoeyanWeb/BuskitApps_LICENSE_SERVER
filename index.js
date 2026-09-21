@@ -409,6 +409,18 @@ const LICENSE_DURATIONS = {
 // ترتیب اولویت چک در زمان ساین‌این: مادام‌العمر > رایگان (تریال) > probation
 const DURATION_ORDER = ["lifetime", "5days", "probation"];
 
+// ── آستانه‌ی ارتقای خودکار probation → lifetime (سه ماه) ────────────────
+// وقتی مشتری پول رو واریز می‌کنه، ادمین دستی expires_at سند licenses رو
+// توی Firestore به تاریخ دور (مثلاً ۲۰ سال بعد) تمدید می‌کنه — بدون هیچ
+// تماس دیگه‌ای با سرور. probation واقعی همیشه فقط ۲ روز فاصله بین
+// activated_at و expires_at داره؛ اگه این فاصله خیلی بیشتر از حد معمولِ
+// «مهلت پرداخت» باشه (اینجا سه ماه در نظر گرفته شده، خیلی فراتر از هر
+// مهلت پرداخت واقعی)، یعنی قطعاً ادمین اون رو دستی تمدید کرده و منظورش
+// مادام‌العمر بوده. پایین‌تر در /signin، دقیقاً همین‌جا (و فقط همین‌جا)
+// این آستانه چک می‌شه تا خودِ سرور، بدون نیاز به صدا زدن یک endpoint
+// جداگانه توسط ادمین، نوع لایسنس رو به «lifetime» اصلاح کنه.
+const AUTO_LIFETIME_GAP_MS = 90 * 24 * 60 * 60 * 1000; // ۳ ماه
+
 // ── appId های مجاز ────────────────────────────────────────────────────────
 // فعلاً فقط همین یک اپ (Buskit-Tools) واقعاً روی سرور کار می‌کنه؛ دو تای
 // دیگه (LiveFX/LiveTools) هنوز منتشر نشدن یا applicationId واقعیشون معلوم
@@ -911,6 +923,26 @@ app.post("/request-probation-license", async (req, res) => {
     // یکی از سه اپ واقعی باشه — جلوی appId جعلی رو می‌گیره.
     if (cleanAppId && !isValidAppId(cleanAppId)) {
       return res.status(400).json({ success: false, error: "invalid-appId" });
+    }
+
+    // ── سقف واقعی سطح دستگاه (فقط وقتی از اپ اندروید درخواست شده، چون فقط
+    // اون‌جا فینگرپرینت واقعی گوشی در دسترسه؛ فرم سایت چنین چیزی نداره).
+    // گیتِ نهاییِ «هر دستگاه فقط یک probation» همچنان در /activate روی
+    // hadProbationLicense انجام می‌شه — این‌جا فقط زودتر جلوی صدور/ایمیلِ
+    // کدهای بی‌مصرف برای دستگاهی که سهمیه‌اش رو مصرف کرده رو می‌گیریم،
+    // تا کسی با ایمیل‌های مختلف کد الکی نسازه (حتی اگه هیچ‌کدوم رو نتونه
+    // فعال کنه).
+    if (cleanFingerprint && cleanAppId) {
+      const deviceDoc = await db
+        .collection("devices")
+        .doc(deviceAppId(cleanFingerprint, cleanAppId))
+        .get();
+      if (deviceDoc.exists && deviceDoc.data().hadProbationLicense) {
+        return res.status(403).json({
+          success: false,
+          error: "device-already-used-probation",
+        });
+      }
     }
 
     // ── یک ایمیل = یک لایسنس probation ──────────────────────────────────
@@ -1838,14 +1870,60 @@ app.post("/signin", async (req, res) => {
         expiresAt = data.expires_at ? data.expires_at.toMillis() : null;
       }
 
+      // ── ارتقای خودکار probation → lifetime (فاصله‌ی غیرعادیِ expires_at) ──
+      // فقط برای لایسنس‌های اختصاصی (نه تریال مشترک ۵روزه)، و فقط وقتی
+      // ادمین expires_at رو دستی خیلی دورتر از حد یک probation واقعی برده.
+      let effectiveDurationType = durationType;
+      let effectiveExpiresAt = expiresAt;
+
       if (
         durationType !== "lifetime" &&
+        !data.is_shared &&
         expiresAt !== null &&
-        Date.now() > expiresAt
+        data.activated_at &&
+        expiresAt - data.activated_at.toMillis() > AUTO_LIFETIME_GAP_MS
+      ) {
+        try {
+          await db.runTransaction(async (tx) => {
+            tx.update(licenseDoc.ref, {
+              license_type: "lifetime",
+              expires_at: null,
+              paid: true,
+              paidAt: admin.firestore.FieldValue.serverTimestamp(),
+              upgradedFrom: durationType,
+              upgradedAt: admin.firestore.FieldValue.serverTimestamp(),
+              autoUpgraded: true,
+            });
+            tx.set(
+              deviceRef,
+              {
+                links: {
+                  [durationType]: admin.firestore.FieldValue.delete(),
+                  lifetime: licenseCode,
+                },
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+              },
+              { merge: true },
+            );
+          });
+          effectiveDurationType = "lifetime";
+          effectiveExpiresAt = null;
+        } catch (upgradeErr) {
+          // اگه ارتقا شکست خورد (مثلاً خطای گذرای Firestore)، رفتار عادی
+          // probation ادامه پیدا می‌کنه — دفعه‌ی بعد که ساین‌این بشه دوباره
+          // امتحان می‌شه، کاربر همچنان معتبر می‌مونه (فقط آفلاین‌کار نیست).
+          console.error("خطا در ارتقای خودکار probation→lifetime:", upgradeErr);
+        }
+      }
+
+      if (
+        effectiveDurationType !== "lifetime" &&
+        effectiveExpiresAt !== null &&
+        Date.now() > effectiveExpiresAt
       ) {
         return res.status(200).json({
           status: "purchase_required",
-          licenseType: durationType,
+          licenseType: effectiveDurationType,
           tier,
           licenseCode,
           versionInfo,
@@ -1856,17 +1934,17 @@ app.post("/signin", async (req, res) => {
         fingerprint,
         appId,
         licenseCode,
-        durationType,
-        expiresAt,
+        effectiveDurationType,
+        effectiveExpiresAt,
         tier,
       );
       return res.status(200).json({
         status: "valid",
         token,
-        licenseType: durationType,
+        licenseType: effectiveDurationType,
         tier,
         licenseCode,
-        expiresAt,
+        expiresAt: effectiveExpiresAt,
         versionInfo,
       });
     }
@@ -2139,6 +2217,117 @@ app.post("/admin/announce-update", requireAdmin, async (req, res) => {
     return res.status(200).json({ status: "ok" });
   } catch (err) {
     console.error("خطا در announce-update:", err);
+    return res.status(500).json({ status: "error", error: "Server error" });
+  }
+});
+
+// ── ثبت پرداخت لایسنس probation + ارتقا به lifetime (فقط ادمین، یک قدم) ──
+// body: { licenseCode }
+// این endpoint جایگزین همون کاری می‌شه که قبلاً قرار بود دستی انجام بدی:
+// «بعد از دریافت سند واریزی، paid رو دستی true کن» (کامنت خط ۹۴۸). یعنی
+// قدم انسانیِ لازم (چک‌کردن رسید بانکی/واتس‌اپ) هنوز سر جاشه و نمی‌شه
+// حذفش کرد — ولی به‌جای دو تا کار جدا (۱- علامت‌زدن paid، ۲- زدن یه
+// endpoint دیگه برای ارتقا)، همه‌چیز توی همین یک درخواست انجام می‌شه.
+// چون این فقط یه HTTP endpoint معمولیه (نه صف/کرون که یکی‌یکی پردازش کنه)،
+// هم برای «۲۰ تا مشتری هم‌زمان» هم «یکی در ساعت» یکسان کار می‌کنه — هر
+// درخواست کاملاً مستقل پردازش می‌شه، منتظر بقیه نمی‌مونه.
+//
+// دو حالت را پوشش می‌دهد:
+//   الف) کاربر از قبل روی گوشی‌اش activate کرده (is_used=true): سند
+//        licenses و سند devices/{fingerprint__appId}.links هر دو با هم
+//        اصلاح می‌شن (چون /signin نوع لایسنس رو از links می‌خونه، نه از
+//        فیلد license_type روی خود سند licenses — توضیح کامل در پیام قبل).
+//   ب) کاربر هنوز activate نکرده (مثلاً پول رو زودتر از فعال‌سازی واریز
+//      کرده): چون هنوز سند devices ساخته نشده، فقط سند licenses کافیه؛
+//      وقتی بعداً /activate بزنه، چون license_type از قبل "lifetime"ه،
+//      مستقیم مسیر lifetime رو طی می‌کنه و از همون اول آفلاین کار می‌کنه.
+app.post("/admin/mark-paid", requireAdmin, async (req, res) => {
+  try {
+    const rawLicenseCode = req.body?.licenseCode;
+    if (!rawLicenseCode || typeof rawLicenseCode !== "string") {
+      return res.status(400).json({ status: "error", error: "licenseCode الزامی است" });
+    }
+    const licenseCode = rawLicenseCode.trim().toUpperCase();
+    const licenseRef = db.collection("licenses").doc(licenseCode);
+
+    const result = await db.runTransaction(async (tx) => {
+      const licenseDoc = await tx.get(licenseRef);
+      if (!licenseDoc.exists) {
+        throw Object.assign(new Error("not-found"), { httpStatus: 404, msg: "کد لایسنس پیدا نشد" });
+      }
+
+      const data = licenseDoc.data();
+
+      if (data.is_shared === true) {
+        throw Object.assign(new Error("shared-license"), {
+          httpStatus: 400,
+          msg: "این عملیات فقط برای لایسنس‌های اختصاصی (probation) معناداره، نه لایسنس‌های مشترک مثل تریال",
+        });
+      }
+
+      const oldType = data.license_type ?? "lifetime";
+      const wasActivated = !!(data.is_used && data.fingerprint && data.appId);
+      const deviceRef = wasActivated
+        ? db.collection("devices").doc(deviceAppId(data.fingerprint, data.appId))
+        : null;
+
+      // ── ثبت پرداخت + ارتقا روی سند لایسنس ───────────────────────────
+      tx.update(licenseRef, {
+        paid: true,
+        paidAt: admin.firestore.FieldValue.serverTimestamp(),
+        license_type: "lifetime",
+        expires_at: null,
+        upgradedFrom: oldType === "lifetime" ? admin.firestore.FieldValue.delete() : oldType,
+        upgradedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      // ── جابه‌جایی کلید روی سند دستگاه (فقط اگه قبلاً activate شده) ───
+      if (deviceRef && oldType !== "lifetime") {
+        tx.set(
+          deviceRef,
+          {
+            links: {
+              [oldType]: admin.firestore.FieldValue.delete(),
+              lifetime: licenseCode,
+            },
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true },
+        );
+      }
+
+      return { oldType, wasActivated };
+    });
+
+    // ── بروزرسانی سند licenseRequests (فقط برای گزارش‌گیری پنل، اختیاری) ──
+    try {
+      const reqSnap = await db
+        .collection("licenseRequests")
+        .where("licenseCode", "==", licenseCode)
+        .limit(1)
+        .get();
+      if (!reqSnap.empty) {
+        await reqSnap.docs[0].ref.update({
+          paid: true,
+          paidAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+    } catch (reqErr) {
+      console.error("خطا در بروزرسانی licenseRequests بعد از mark-paid:", reqErr);
+    }
+
+    return res.status(200).json({
+      status: "ok",
+      licenseCode,
+      upgradedFrom: result.oldType,
+      licenseType: "lifetime",
+      wasActivated: result.wasActivated,
+    });
+  } catch (err) {
+    if (err.httpStatus) {
+      return res.status(err.httpStatus).json({ status: "error", error: err.msg });
+    }
+    console.error("خطا در mark-paid:", err);
     return res.status(500).json({ status: "error", error: "Server error" });
   }
 });
