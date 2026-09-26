@@ -445,6 +445,64 @@ async function getGooglePlayAccessToken() {
   return token;
 }
 
+// ── توکن دسترسی کافه‌بازار (OAuth2 — refresh_token → access_token) ────────
+// این بخش برای بیلد جداگانه‌ای از اپه که مخصوص کافه‌بازار منتشر می‌شه (نه
+// همین اپ اصلی که الان فقط گوگل پلی رو داره) — سرور همچنان از هر دو بیلد
+// پشتیبانی می‌کنه. برخلاف مایکت (یک توکن ثابت)، بازار از OAuth2 استفاده
+// می‌کنه: یک‌بار باید دستی این آدرس رو توی مرورگر باز کنی (بعد از لاگین به
+// حساب توسعه‌دهنده‌ی بازار) و code برگشتی رو به refresh_token تبدیل کنی:
+//   https://pardakht.cafebazaar.ir/devapi/v2/auth/authorize/?response_type=code&access_type=offline&redirect_uri=<REDIRECT_URI>&client_id=<CLIENT_ID>
+// این refresh_token رو یک‌بار در env می‌ذاری؛ سرور خودش با همین، هر بار که
+// لازم شد access_token تازه می‌گیره (پایین‌تر در getBazaarAccessToken).
+const BAZAAR_CLIENT_ID = process.env.BAZAAR_CLIENT_ID;
+const BAZAAR_CLIENT_SECRET = process.env.BAZAAR_CLIENT_SECRET;
+const BAZAAR_REFRESH_TOKEN = process.env.BAZAAR_REFRESH_TOKEN;
+const BAZAAR_TOKEN_URL = "https://pardakht.cafebazaar.ir/devapi/v2/auth/token/";
+
+// ── کش سراسری access_token بازار (توی حافظه‌ی همین پروسه) ────────────────
+// access_token عمر کوتاهی داره (طبق مستندات بازار، حدود ۱ ساعت). به‌جای
+// اینکه به ازای هر خرید یک درخواست جدید به /auth/token/ بزنیم، همینو نگه
+// می‌داریم و فقط وقتی نزدیک انقضاست (یا هنوز نگرفتیمش) تازه‌ش می‌کنیم.
+let bazaarTokenCache = { accessToken: null, expiresAt: 0 };
+
+async function getBazaarAccessToken() {
+  if (bazaarTokenCache.accessToken && Date.now() < bazaarTokenCache.expiresAt) {
+    return bazaarTokenCache.accessToken;
+  }
+  if (!BAZAAR_CLIENT_ID || !BAZAAR_CLIENT_SECRET || !BAZAAR_REFRESH_TOKEN) {
+    throw new Error(
+      "BAZAAR_CLIENT_ID / BAZAAR_CLIENT_SECRET / BAZAAR_REFRESH_TOKEN تنظیم نشده",
+    );
+  }
+
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    client_id: BAZAAR_CLIENT_ID,
+    client_secret: BAZAAR_CLIENT_SECRET,
+    refresh_token: BAZAAR_REFRESH_TOKEN,
+  });
+
+  const res = await fetch(BAZAAR_TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+  const data = await res.json();
+
+  if (!res.ok || data.error || !data.access_token) {
+    throw new Error(
+      `تازه‌سازی توکن بازار شکست خورد: ${data.error || res.status}`,
+    );
+  }
+
+  // ۶۰ ثانیه حاشیه‌ی امن قبل از انقضای واقعی، برای جلوگیری از race با درخواست بعدی
+  bazaarTokenCache = {
+    accessToken: data.access_token,
+    expiresAt: Date.now() + (Number(data.expires_in) || 3600) * 1000 - 60_000,
+  };
+  return bazaarTokenCache.accessToken;
+}
+
 // ── سرویس ایمیل (Brevo — از طریق HTTP API، نه SMTP) ──────────────────────
 // چرا Brevo به‌جای Gmail SMTP: Render (پلن رایگان) پورت‌های خروجی SMTP
 // (۲۵/۴۶۵/۵۸۷) رو کاملاً مسدود می‌کنه — این یک محدودیت شناخته‌شده‌ی خودِ
@@ -734,6 +792,19 @@ const MYKET_SKU_LICENSE_MAP = {
 // Console → Monetize → Products → In-app products ساختی. عمداً سمت سرور
 // نگه داشته می‌شه، نه چیزی که از body درخواست خونده بشه.
 const GOOGLE_PLAY_SKU_LICENSE_MAP = {
+  buskit_lifetime: {
+    tier: "gold",
+    license_type: "lifetime",
+    appGeneration: "v1",
+  },
+};
+
+// ── نگاشت productId کافه‌بازار → سطح و مدت لایسنس ──────────────────────
+// برای بیلد جداگانه‌ی مخصوص کافه‌بازار (نه اپ اصلی گوگل‌پلی). دقیقاً معادل
+// MYKET_SKU_LICENSE_MAP بالا. کلید این آبجکت باید حرف‌به‌حرف همون شناسه‌ی
+// محصولی باشه که توی پیشخوان بازار (Cafe Bazaar Developer Console) ساختی.
+// عمداً سمت سرور نگه داشته می‌شه، نه چیزی که از body درخواست خونده بشه.
+const BAZAAR_SKU_LICENSE_MAP = {
   buskit_lifetime: {
     tier: "gold",
     license_type: "lifetime",
@@ -1894,6 +1965,179 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
     });
   } catch (err) {
     console.error("خطا در تایید خرید گوگل پلی:", err);
+    return res.status(500).json({ success: false, error: "Server error" });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════
+//  تایید خرید کافه‌بازار → ساخت خودکار و فعال‌سازی فوری لایسنس
+// ════════════════════════════════════════════════════════════════════════
+// این endpoint برای بیلد جداگانه‌ی مخصوص کافه‌بازار (اپ اصلی الان فقط
+// گوگل‌پلی داره، ولی سرور همچنان از هر دو بیلد پشتیبانی می‌کنه).
+// دقیقاً همون الگوی /myket/verify-purchase بالا، با دو فرق:
+//   ۱) بازار به‌جای یک توکن ثابت، از OAuth2 استفاده می‌کنه (getBazaarAccessToken).
+//   ۲) آدرس و ساختار verify API فرق داره (GET با Bearer token، نه POST).
+// جریان کار:
+//   ۱) skuId رو از BAZAAR_SKU_LICENSE_MAP (نگاشتِ امنِ سمت سرور) به
+//      tier/duration تبدیل می‌کنیم — اگه sku ناشناخته بود، رد می‌کنیم.
+//   ۲) چک می‌کنیم این purchaseToken قبلاً پردازش نشده باشه (idempotency).
+//   ۳) از سرور (نه کلاینت) به Bazaar Purchase Validate API وصل می‌شیم و
+//      purchaseState رو چک می‌کنیم — طبق مستندات بازار 0 یعنی موفق.
+//   ۴) در صورت موفقیت، بلافاصله لایسنس مادام‌العمر می‌سازیم، به همین
+//      fingerprint/appId گره می‌زنیم، و یک توکن امضاشده برمی‌گردونیم —
+//      دقیقاً همون ساختار پاسخ /activate و /myket/verify-purchase.
+app.post("/bazaar/verify-purchase", async (req, res) => {
+  try {
+    const {
+      purchaseToken,
+      skuId,
+      fingerprint,
+      appId,
+      hardwareSignature,
+      appGeneration,
+    } = req.body;
+
+    if (!purchaseToken || !skuId || !fingerprint || !appId) {
+      return res.status(400).json({
+        success: false,
+        error: "purchaseToken, skuId, fingerprint and appId are required",
+      });
+    }
+
+    if (!isValidAppId(appId)) {
+      return res.status(400).json({ success: false, error: "Unknown appId" });
+    }
+
+    const info = BAZAAR_SKU_LICENSE_MAP[skuId];
+    if (!info) {
+      console.error(`بازار: skuId ناشناخته (${skuId})`);
+      return res.status(400).json({ success: false, error: "Unknown product" });
+    }
+
+    // ── idempotency: این purchaseToken قبلاً پردازش شده؟ ─────────────
+    // (چه به‌خاطر retry شبکه‌ای کلاینت، چه سوءاستفاده‌ی عمدی از یک توکن قدیمی)
+    const purchaseRef = db.collection("bazaarPurchases").doc(purchaseToken);
+    const existingPurchase = await purchaseRef.get();
+    if (existingPurchase.exists) {
+      const prev = existingPurchase.data();
+      const token = createSignedToken(
+        prev.fingerprint,
+        prev.appId,
+        prev.licenseCode,
+        prev.licenseType,
+        null,
+        prev.tier,
+      );
+      return res.status(200).json({
+        success: true,
+        token,
+        licenseType: prev.licenseType,
+        tier: prev.tier,
+        licenseCode: prev.licenseCode,
+        expiresAt: null,
+      });
+    }
+
+    // ── صحت‌سنجی خرید با سرور بازار (server-to-server) ───────────────
+    // طبق مستندات رسمی بازار (developers.cafebazaar.ir → Developer API v2
+    // → purchase validation): GET با Authorization: Bearer {access_token}
+    // روی /devapi/v2/api/validate/{packageName}/inapp/{productId}/purchases/{purchaseToken}/
+    let bazaarData;
+    try {
+      const accessToken = await getBazaarAccessToken();
+      const verifyUrl = `https://pardakht.cafebazaar.ir/devapi/v2/api/validate/${encodeURIComponent(
+        appId,
+      )}/inapp/${encodeURIComponent(skuId)}/purchases/${encodeURIComponent(
+        purchaseToken,
+      )}/`;
+      const bazaarRes = await fetch(verifyUrl, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      bazaarData = await bazaarRes.json();
+      if (!bazaarRes.ok || bazaarData.error) {
+        console.error("بازار: خطای verify API:", bazaarData);
+        return res.status(502).json({
+          success: false,
+          error:
+            bazaarData?.error_description || "Purchase verification failed",
+        });
+      }
+    } catch (err) {
+      console.error("بازار: خطا در اتصال به verify API:", err);
+      return res
+        .status(502)
+        .json({ success: false, error: "Could not reach Bazaar" });
+    }
+
+    // طبق مستندات بازار: purchaseState === 0 یعنی خرید موفق
+    if (bazaarData.purchaseState !== 0) {
+      return res
+        .status(403)
+        .json({ success: false, error: "Purchase not successful" });
+    }
+
+    // ── ساخت لایسنس + ثبت idempotency، هر دو در یک تراکنش ─────────────
+    const licenseCode = generateLicenseCode();
+    const tier = info.tier;
+    const licenseType = info.license_type;
+
+    await db.runTransaction(async (tx) => {
+      tx.set(db.collection("licenses").doc(licenseCode), {
+        tier,
+        license_type: licenseType,
+        appGeneration: info.appGeneration || CURRENT_APP_GENERATION,
+        is_shared: false,
+        is_used: true,
+        fingerprint,
+        appId,
+        hardwareSignature: hardwareSignature || null,
+        source: "bazaar",
+        bazaar_sku_id: skuId,
+        bazaar_purchase_token: purchaseToken,
+        activated_at: admin.firestore.FieldValue.serverTimestamp(),
+        expires_at: null, // فقط lifetime می‌فروشیم
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      tx.set(purchaseRef, {
+        skuId,
+        fingerprint,
+        appId,
+        licenseCode,
+        licenseType,
+        tier,
+        processedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+
+    await linkDevice(
+      fingerprint,
+      appId,
+      licenseType,
+      licenseCode,
+      appGeneration,
+    );
+
+    const token = createSignedToken(
+      fingerprint,
+      appId,
+      licenseCode,
+      licenseType,
+      null,
+      tier,
+    );
+
+    return res.status(200).json({
+      success: true,
+      token,
+      licenseType,
+      tier,
+      licenseCode,
+      expiresAt: null,
+    });
+  } catch (err) {
+    console.error("خطا در تایید خرید بازار:", err);
     return res.status(500).json({ success: false, error: "Server error" });
   }
 });
