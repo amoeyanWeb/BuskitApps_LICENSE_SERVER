@@ -92,9 +92,7 @@ async function fetchRatesFromYekrial() {
   const usdToman = extractYekrialTomanPrice(html, "USD");
   const tryToman = extractYekrialTomanPrice(html, "TRY");
   if (!usdToman || !tryToman) {
-    throw new Error(
-      "yekrial.com: قیمت دلار یا لیر در صفحه پیدا نشد (شاید ساختار صفحه تغییر کرده)",
-    );
+    throw new Error("yekrial.com: قیمت دلار یا لیر در صفحه پیدا نشد (شاید ساختار صفحه تغییر کرده)");
   }
 
   const data = {
@@ -116,44 +114,29 @@ async function fetchUsdIrrFromYekrial() {
 
 // ── منبع ۲ برای نرخ دلار/لیر: doviz.com ────────────────────────────────────
 async function fetchUsdTryFromDovizCom() {
-  const res = await fetch(
-    "https://www.doviz.com/api/v1/currencies/all/latest",
-    {
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; BuskitRateBot/1.0)" },
-    },
-  );
+  const res = await fetch("https://www.doviz.com/api/v1/currencies/all/latest", {
+    headers: { "User-Agent": "Mozilla/5.0 (compatible; BuskitRateBot/1.0)" },
+  });
   if (!res.ok) throw new Error(`doviz.com پاسخ HTTP ${res.status} داد`);
   const json = await res.json();
-  const list = Array.isArray(json)
-    ? json
-    : json?.data || Object.values(json || {});
+  const list = Array.isArray(json) ? json : json?.data || Object.values(json || {});
   const usdItem = list.find(
-    (it) =>
-      (it?.code || it?.symbol || it?.Symbol || "").toString().toUpperCase() ===
-      "USD",
+    (it) => (it?.code || it?.symbol || it?.Symbol || "").toString().toUpperCase() === "USD",
   );
-  const buy = Number(
-    usdItem?.buying ?? usdItem?.buy ?? usdItem?.Alis ?? usdItem?.alis,
-  );
-  const sell = Number(
-    usdItem?.selling ?? usdItem?.sell ?? usdItem?.Satis ?? usdItem?.satis,
-  );
+  const buy = Number(usdItem?.buying ?? usdItem?.buy ?? usdItem?.Alis ?? usdItem?.alis);
+  const sell = Number(usdItem?.selling ?? usdItem?.sell ?? usdItem?.Satis ?? usdItem?.satis);
   const rate = buy > 0 && sell > 0 ? (buy + sell) / 2 : Number(buy || sell);
-  if (!rate || Number.isNaN(rate))
-    throw new Error("doviz.com: نرخ USD در پاسخ پیدا نشد");
+  if (!rate || Number.isNaN(rate)) throw new Error("doviz.com: نرخ USD در پاسخ پیدا نشد");
   return rate; // ۱ دلار = rate لیر
 }
 
 // ── منبع ۳ برای نرخ دلار/لیر: Frankfurter (نرخ رسمی بانک مرکزی اروپا) ──────
 async function fetchUsdTryFromFrankfurter() {
-  const res = await fetch(
-    "https://api.frankfurter.dev/v1/latest?base=USD&symbols=TRY",
-  );
+  const res = await fetch("https://api.frankfurter.dev/v1/latest?base=USD&symbols=TRY");
   if (!res.ok) throw new Error(`Frankfurter پاسخ HTTP ${res.status} داد`);
   const json = await res.json();
   const rate = Number(json?.rates?.TRY);
-  if (!rate || Number.isNaN(rate))
-    throw new Error("Frankfurter: نرخ TRY در پاسخ پیدا نشد");
+  if (!rate || Number.isNaN(rate)) throw new Error("Frankfurter: نرخ TRY در پاسخ پیدا نشد");
   return rate;
 }
 
@@ -165,32 +148,22 @@ async function fetchUsdIrrFromBonbast() {
   const json = await res.json();
   const buyToman = Number(json?.usd1 ?? json?.usd_sell ?? json?.usd?.sell);
   const sellToman = Number(json?.usd2 ?? json?.usd_buy ?? json?.usd?.buy);
-  const toman =
-    buyToman > 0 && sellToman > 0
-      ? (buyToman + sellToman) / 2
-      : Number(buyToman || sellToman);
-  if (!toman || Number.isNaN(toman))
-    throw new Error("bonbast: نرخ usd در پاسخ پیدا نشد");
+  const toman = buyToman > 0 && sellToman > 0 ? (buyToman + sellToman) / 2 : Number(buyToman || sellToman);
+  if (!toman || Number.isNaN(toman)) throw new Error("bonbast: نرخ usd در پاسخ پیدا نشد");
   return toman * 10; // تومان → ریال
 }
 
 // ── منبع ۳ برای نرخ دلار/ریال بازار آزاد: brsapi (رایگان) ─────────────────
 async function fetchUsdIrrFromBrsApi() {
-  const res = await fetch(
-    "https://BrsApi.ir/FreeTsetmcBourseApi/Api_Free_Gold_Currency_v2.json",
-  );
+  const res = await fetch("https://BrsApi.ir/FreeTsetmcBourseApi/Api_Free_Gold_Currency_v2.json");
   if (!res.ok) throw new Error(`brsapi پاسخ HTTP ${res.status} داد`);
   const json = await res.json();
   const list = json?.currency || json?.Currency || [];
   const usdItem = list.find((it) =>
-    (it?.symbol || it?.name_en || it?.Symbol || "")
-      .toString()
-      .toUpperCase()
-      .includes("USD"),
+    (it?.symbol || it?.name_en || it?.Symbol || "").toString().toUpperCase().includes("USD"),
   );
   const toman = Number(usdItem?.price ?? usdItem?.Price);
-  if (!toman || Number.isNaN(toman))
-    throw new Error("brsapi: نرخ usd در پاسخ پیدا نشد");
+  if (!toman || Number.isNaN(toman)) throw new Error("brsapi: نرخ usd در پاسخ پیدا نشد");
   return toman * 10; // تومان → ریال
 }
 
@@ -251,9 +224,7 @@ async function runRateJob(jobKey, sources, applyResult, label) {
     const { value, source } = await fetchFirstSuccessful(sources);
     applyResult(value, source);
     await persistRatesToFirestore();
-    console.log(
-      `[نرخ ارز] ${label} با موفقیت از «${source}» گرفته شد: ${value}`,
-    );
+    console.log(`[نرخ ارز] ${label} با موفقیت از «${source}» گرفته شد: ${value}`);
     return { success: true, value, source };
   } catch (err) {
     console.error(
@@ -294,14 +265,7 @@ function msUntilNextIstanbulTime(hour, minute) {
   }).formatToParts(now);
   const get = (type) => Number(parts.find((p) => p.type === type).value);
   const istNow = new Date(
-    Date.UTC(
-      get("year"),
-      get("month") - 1,
-      get("day"),
-      get("hour"),
-      get("minute"),
-      get("second"),
-    ),
+    Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"), get("second")),
   );
   const target = new Date(istNow);
   target.setUTCHours(hour, minute, 0, 0);
@@ -309,14 +273,7 @@ function msUntilNextIstanbulTime(hour, minute) {
   return target.getTime() - istNow.getTime();
 }
 
-function scheduleDailyRateJob(
-  hour,
-  minute,
-  jobKey,
-  sources,
-  applyResult,
-  label,
-) {
+function scheduleDailyRateJob(hour, minute, jobKey, sources, applyResult, label) {
   const delay = msUntilNextIstanbulTime(hour, minute);
   console.log(
     `[نرخ ارز] زمان‌بندی ${label}: اولین اجرا تا ${Math.round(delay / 60000)} دقیقه‌ی دیگر ` +
@@ -324,10 +281,7 @@ function scheduleDailyRateJob(
   );
   setTimeout(function runAndReschedule() {
     runRateJob(jobKey, sources, applyResult, label);
-    setInterval(
-      () => runRateJob(jobKey, sources, applyResult, label),
-      24 * 60 * 60 * 1000,
-    );
+    setInterval(() => runRateJob(jobKey, sources, applyResult, label), 24 * 60 * 60 * 1000);
   }, delay);
 }
 
@@ -347,21 +301,16 @@ async function initRatesSystem() {
       if (data.usdToTry) {
         latestRates.usdToTry = data.usdToTry;
         latestRates.usdToTrySource = data.usdToTrySource || null;
-        latestRates.usdToTryUpdatedAt =
-          data.usdToTryUpdatedAt?.toDate?.() || null;
+        latestRates.usdToTryUpdatedAt = data.usdToTryUpdatedAt?.toDate?.() || null;
       }
       if (data.usdToIrr) {
         latestRates.usdToIrr = data.usdToIrr;
         latestRates.usdToIrrSource = data.usdToIrrSource || null;
-        latestRates.usdToIrrUpdatedAt =
-          data.usdToIrrUpdatedAt?.toDate?.() || null;
+        latestRates.usdToIrrUpdatedAt = data.usdToIrrUpdatedAt?.toDate?.() || null;
       }
     }
   } catch (err) {
-    console.error(
-      "[نرخ ارز] خواندن نرخ ذخیره‌شده از Firestore ناموفق بود:",
-      err.message,
-    );
+    console.error("[نرخ ارز] خواندن نرخ ذخیره‌شده از Firestore ناموفق بود:", err.message);
   }
 
   // اگر سرور همین امروز ری‌استارت شده و نرخ امروز هنوز گرفته نشده، یک تلاش فوری بزن
@@ -369,30 +318,11 @@ async function initRatesSystem() {
     runRateJob("usdTry", USD_TRY_SOURCES, applyUsdTryResult, "نرخ دلار/لیر");
   }
   if (!isUpdatedToday(latestRates.usdToIrrUpdatedAt)) {
-    runRateJob(
-      "usdIrr",
-      USD_IRR_SOURCES,
-      applyUsdIrrResult,
-      "نرخ دلار/ریال بازار آزاد",
-    );
+    runRateJob("usdIrr", USD_IRR_SOURCES, applyUsdIrrResult, "نرخ دلار/ریال بازار آزاد");
   }
 
-  scheduleDailyRateJob(
-    13,
-    0,
-    "usdTry",
-    USD_TRY_SOURCES,
-    applyUsdTryResult,
-    "نرخ دلار/لیر",
-  );
-  scheduleDailyRateJob(
-    15,
-    0,
-    "usdIrr",
-    USD_IRR_SOURCES,
-    applyUsdIrrResult,
-    "نرخ دلار/ریال بازار آزاد",
-  );
+  scheduleDailyRateJob(13, 0, "usdTry", USD_TRY_SOURCES, applyUsdTryResult, "نرخ دلار/لیر");
+  scheduleDailyRateJob(15, 0, "usdIrr", USD_IRR_SOURCES, applyUsdIrrResult, "نرخ دلار/ریال بازار آزاد");
 }
 
 initRatesSystem();
@@ -408,42 +338,62 @@ const privateKey = process.env.PRIVATE_KEY.replace(/\\n/g, "\n");
 // رو دستکاری کنه یا وضعیت خریدها رو بخونه.
 const MYKET_ACCESS_TOKEN = process.env.MYKET_ACCESS_TOKEN;
 
-// ── توکن دسترسی گوگل پلی (Service Account، برای Google Play Developer API) ──
-// برخلاف بازار (OAuth2 دستی با refresh_token) و مایکت (توکن ثابت)، گوگل پلی
-// از یک Service Account استفاده می‌کنه:
-//   ۱) توی Google Cloud Console (همون پروژه‌ی Firebase یا یک پروژه‌ی جدا)
-//      یک Service Account بساز و کلید JSON‌اش رو بگیر.
-//   ۲) توی Google Play Console → Setup → API access، همون پروژه‌ی Cloud رو
-//      لینک کن و به این Service Account دسترسی بده (حداقل «View financial
-//      data, orders, and cancellation survey responses» و «Manage orders
-//      and subscriptions» رو زیر «App access» تیک بزن).
-//   ۳) کل محتوای فایل JSON رو (یک‌جا، به‌صورت رشته) در متغیر محیطی
-//      GOOGLE_PLAY_SERVICE_ACCOUNT بذار — دقیقاً مثل SERVICE_ACCOUNT بالا.
-// نیازمند پکیج google-auth-library (npm install google-auth-library)؛ خود
-// این کتابخانه cache و تمدید access_token رو داخلی مدیریت می‌کنه، پس
-// نیازی به کش دستی مثل bazaarTokenCache قبلی نیست.
-const { GoogleAuth } = require("google-auth-library");
-const GOOGLE_PLAY_SERVICE_ACCOUNT = process.env.GOOGLE_PLAY_SERVICE_ACCOUNT
-  ? JSON.parse(process.env.GOOGLE_PLAY_SERVICE_ACCOUNT)
-  : null;
-const googlePlayAuth = GOOGLE_PLAY_SERVICE_ACCOUNT
-  ? new GoogleAuth({
-      credentials: GOOGLE_PLAY_SERVICE_ACCOUNT,
-      scopes: ["https://www.googleapis.com/auth/androidpublisher"],
-    })
-  : null;
+// ── توکن دسترسی کافه‌بازار (OAuth2 — refresh_token → access_token) ────────
+// برخلاف مایکت (یک توکن ثابت)، بازار از OAuth2 استفاده می‌کنه: یک‌بار باید
+// دستی این آدرس رو توی مرورگر باز کنی (بعد از لاگین به حساب توسعه‌دهنده‌ی
+// بازار) و code برگشتی رو به refresh_token تبدیل کنی:
+//   https://pardakht.cafebazaar.ir/devapi/v2/auth/authorize/?response_type=code&access_type=offline&redirect_uri=<REDIRECT_URI>&client_id=<CLIENT_ID>
+// این refresh_token رو یک‌بار در env می‌ذاری؛ سرور خودش با همین، هر بار که
+// لازم شد access_token تازه می‌گیره (پایین‌تر در getBazaarAccessToken).
+const BAZAAR_CLIENT_ID = process.env.BAZAAR_CLIENT_ID;
+const BAZAAR_CLIENT_SECRET = process.env.BAZAAR_CLIENT_SECRET;
+const BAZAAR_REFRESH_TOKEN = process.env.BAZAAR_REFRESH_TOKEN;
+const BAZAAR_TOKEN_URL = "https://pardakht.cafebazaar.ir/devapi/v2/auth/token/";
 
-async function getGooglePlayAccessToken() {
-  if (!googlePlayAuth) {
-    throw new Error("GOOGLE_PLAY_SERVICE_ACCOUNT تنظیم نشده");
+// ── کش سراسری access_token بازار (توی حافظه‌ی همین پروسه) ────────────────
+// access_token عمر کوتاهی داره (طبق مستندات بازار، حدود ۱ ساعت). به‌جای
+// اینکه به ازای هر خرید یک درخواست جدید به /auth/token/ بزنیم، همینو نگه
+// می‌داریم و فقط وقتی نزدیک انقضاست (یا هنوز نگرفتیمش) تازه‌ش می‌کنیم.
+let bazaarTokenCache = { accessToken: null, expiresAt: 0 };
+
+async function getBazaarAccessToken() {
+  if (bazaarTokenCache.accessToken && Date.now() < bazaarTokenCache.expiresAt) {
+    return bazaarTokenCache.accessToken;
   }
-  const client = await googlePlayAuth.getClient();
-  const { token } = await client.getAccessToken();
-  if (!token) {
-    throw new Error("گرفتن access token گوگل پلی شکست خورد");
+  if (!BAZAAR_CLIENT_ID || !BAZAAR_CLIENT_SECRET || !BAZAAR_REFRESH_TOKEN) {
+    throw new Error(
+      "BAZAAR_CLIENT_ID / BAZAAR_CLIENT_SECRET / BAZAAR_REFRESH_TOKEN تنظیم نشده",
+    );
   }
-  return token;
+
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    client_id: BAZAAR_CLIENT_ID,
+    client_secret: BAZAAR_CLIENT_SECRET,
+    refresh_token: BAZAAR_REFRESH_TOKEN,
+  });
+
+  const res = await fetch(BAZAAR_TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+  const data = await res.json();
+
+  if (!res.ok || data.error || !data.access_token) {
+    throw new Error(
+      `تازه‌سازی توکن بازار شکست خورد: ${data.error || res.status}`,
+    );
+  }
+
+  // ۶۰ ثانیه حاشیه‌ی امن قبل از انقضای واقعی، برای جلوگیری از race با درخواست بعدی
+  bazaarTokenCache = {
+    accessToken: data.access_token,
+    expiresAt: Date.now() + (Number(data.expires_in) || 3600) * 1000 - 60_000,
+  };
+  return bazaarTokenCache.accessToken;
 }
+
 
 // ── سرویس ایمیل (Brevo — از طریق HTTP API، نه SMTP) ──────────────────────
 // چرا Brevo به‌جای Gmail SMTP: Render (پلن رایگان) پورت‌های خروجی SMTP
@@ -721,24 +671,16 @@ const LS_VARIANT_LICENSE_MAP = {
 // مایکت ساختی (و همون چیزی که کلاینت در MYKET_SKU_LIFETIME می‌فرسته).
 // عمداً سمت سرور نگه داشته می‌شه، نه چیزی که از body درخواست خونده بشه.
 const MYKET_SKU_LICENSE_MAP = {
-  buskit_lifetime: {
-    tier: "gold",
-    license_type: "lifetime",
-    appGeneration: "v1",
-  },
+  buskit_lifetime: { tier: "gold", license_type: "lifetime", appGeneration: "v1" },
 };
 
-// ── نگاشت productId گوگل پلی → سطح و مدت لایسنس ────────────────────────
-// دقیقاً معادل MYKET_SKU_LICENSE_MAP بالا، ولی برای محصولات گوگل پلی. کلید
-// این آبجکت باید حرف‌به‌حرف همون Product ID‌ای باشه که توی Google Play
-// Console → Monetize → Products → In-app products ساختی. عمداً سمت سرور
-// نگه داشته می‌شه، نه چیزی که از body درخواست خونده بشه.
-const GOOGLE_PLAY_SKU_LICENSE_MAP = {
-  buskit_lifetime: {
-    tier: "gold",
-    license_type: "lifetime",
-    appGeneration: "v1",
-  },
+// ── نگاشت productId کافه‌بازار → سطح و مدت لایسنس ──────────────────────
+// دقیقاً معادل MYKET_SKU_LICENSE_MAP بالا، ولی برای محصولات بازار. کلید
+// این آبجکت باید حرف‌به‌حرف همون شناسه‌ی محصولی باشه که توی پیشخوان بازار
+// (Cafe Bazaar Developer Console) ساختی. عمداً سمت سرور نگه داشته می‌شه،
+// نه چیزی که از body درخواست خونده بشه.
+const BAZAAR_SKU_LICENSE_MAP = {
+  buskit_lifetime: { tier: "gold", license_type: "lifetime", appGeneration: "v1" },
 };
 
 // ── کد سیستمیِ «بدون کد تخفیف» ────────────────────────────────────────────
@@ -755,8 +697,7 @@ const LICENSE_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 function generateLicenseCode() {
   let code = "";
   for (let i = 0; i < 10; i++) {
-    code +=
-      LICENSE_CODE_ALPHABET[crypto.randomInt(LICENSE_CODE_ALPHABET.length)];
+    code += LICENSE_CODE_ALPHABET[crypto.randomInt(LICENSE_CODE_ALPHABET.length)];
   }
   return code;
 }
@@ -857,33 +798,32 @@ const PAYMENT_ACCOUNTS = {
 };
 
 function buildAccountsBlock(lang) {
-  const t =
-    {
-      fa: {
-        heading: "حساب‌های بانکی جهت واریز وجه:",
-        iran: "کارت بانکی ایران (بانک ملت):",
-        owner: "به نام:",
-        tr: "حساب لیر ترکیه (Ziraat Bank):",
-      },
-      en: {
-        heading: "Bank accounts for payment:",
-        iran: "Iranian bank card (Bank Mellat):",
-        owner: "Account holder:",
-        tr: "Turkish Lira account (Ziraat Bank):",
-      },
-      tr: {
-        heading: "Ödeme için banka hesapları:",
-        iran: "İran banka kartı (Bank Mellat):",
-        owner: "Hesap sahibi:",
-        tr: "Türk Lirası hesabı (Ziraat Bank):",
-      },
-      de: {
-        heading: "Bankkonten für die Zahlung:",
-        iran: "Iranische Bankkarte (Bank Mellat):",
-        owner: "Kontoinhaber:",
-        tr: "Türkische-Lira-Konto (Ziraat Bank):",
-      },
-    }[lang] || null;
+  const t = {
+    fa: {
+      heading: "حساب‌های بانکی جهت واریز وجه:",
+      iran: "کارت بانکی ایران (بانک ملت):",
+      owner: "به نام:",
+      tr: "حساب لیر ترکیه (Ziraat Bank):",
+    },
+    en: {
+      heading: "Bank accounts for payment:",
+      iran: "Iranian bank card (Bank Mellat):",
+      owner: "Account holder:",
+      tr: "Turkish Lira account (Ziraat Bank):",
+    },
+    tr: {
+      heading: "Ödeme için banka hesapları:",
+      iran: "İran banka kartı (Bank Mellat):",
+      owner: "Hesap sahibi:",
+      tr: "Türk Lirası hesabı (Ziraat Bank):",
+    },
+    de: {
+      heading: "Bankkonten für die Zahlung:",
+      iran: "Iranische Bankkarte (Bank Mellat):",
+      owner: "Kontoinhaber:",
+      tr: "Türkische-Lira-Konto (Ziraat Bank):",
+    },
+  }[lang] || null;
   const L = t || {
     heading: "Bank accounts for payment:",
     iran: "Iranian bank card (Bank Mellat):",
@@ -989,10 +929,7 @@ async function sendProbationLicenseEmail(email, name, licenseCode, lang) {
     email: process.env.BREVO_SENDER_EMAIL || PAYMENT_ACCOUNTS.contactEmail,
   };
   // پاسخ مشتری (ارسال سند واریزی) همیشه به آدرس اصلی برگردد
-  sendSmtpEmail.replyTo = {
-    email: PAYMENT_ACCOUNTS.contactEmail,
-    name: "Buskit",
-  };
+  sendSmtpEmail.replyTo = { email: PAYMENT_ACCOUNTS.contactEmail, name: "Buskit" };
   sendSmtpEmail.to = [{ email, name: name || undefined }];
   sendSmtpEmail.subject = subject;
   sendSmtpEmail.htmlContent = html;
@@ -1043,7 +980,9 @@ app.post("/request-probation-license", async (req, res) => {
       typeof appId === "string" && appId.trim() ? appId.trim() : null;
 
     if (!cleanName || !cleanEmail || !/^\S+@\S+\.\S+$/.test(cleanEmail)) {
-      return res.status(400).json({ success: false, error: "invalid-input" });
+      return res
+        .status(400)
+        .json({ success: false, error: "invalid-input" });
     }
 
     // اگه appId فرستاده شده (فعلاً فقط اپ اندروید این کار رو می‌کنه)، باید
@@ -1080,7 +1019,9 @@ app.post("/request-probation-license", async (req, res) => {
       .limit(1)
       .get();
     if (!dup.empty) {
-      return res.status(409).json({ success: false, error: "already-issued" });
+      return res
+        .status(409)
+        .json({ success: false, error: "already-issued" });
     }
 
     const licenseCode = generateLicenseCode();
@@ -1119,10 +1060,13 @@ app.post("/request-probation-license", async (req, res) => {
         licenseCode,
         safeLang,
       );
-      await db.collection("licenses").doc(licenseCode).update({
-        delivered: true,
-        deliveredAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
+      await db
+        .collection("licenses")
+        .doc(licenseCode)
+        .update({
+          delivered: true,
+          deliveredAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
     } catch (mailErr) {
       emailSent = false;
       console.error("خطا در ارسال ایمیل لایسنس probation:", mailErr);
@@ -1149,7 +1093,9 @@ app.post("/request-probation-license", async (req, res) => {
     // ── اپ اندروید: کد را همیشه در پاسخ برمی‌گردانیم (چه ایمیل رفته باشد
     // چه نه)، چون در اپ خودِ دیالوگ کانال اصلی تحویل کد است.
     if (isAppRequest) {
-      return res.status(200).json({ success: true, licenseCode, emailSent });
+      return res
+        .status(200)
+        .json({ success: true, licenseCode, emailSent });
     }
 
     // ── سایت: رفتار قبلی دست‌نخورده — اگر ایمیل نرفت، به کاربر می‌گوییم که
@@ -1257,19 +1203,13 @@ app.post("/create-order", async (req, res) => {
     // آیتم‌هایی که واقعاً قرار است کد تخفیفِ وارد شده رویشان اعمال شود، در
     // برابر بقیه‌ی آیتم‌ها که (بدون کد یا با discountApplied:false) زیر کد
     // سیستمیِ «فروش مستقیم» جمع می‌شوند
-    const discountedCount = licenseItems.filter(
-      (it) => it.discountApplied,
-    ).length;
+    const discountedCount = licenseItems.filter((it) => it.discountApplied).length;
     const directCount = licenseItems.length - discountedCount;
 
     const codeRef =
-      code && discountedCount > 0
-        ? db.collection("discountCodes").doc(code)
-        : null;
+      code && discountedCount > 0 ? db.collection("discountCodes").doc(code) : null;
     const directRef =
-      directCount > 0
-        ? db.collection("discountCodes").doc(NO_DISCOUNT_CODE)
-        : null;
+      directCount > 0 ? db.collection("discountCodes").doc(NO_DISCOUNT_CODE) : null;
     const orderRef = db.collection("orders").doc();
     const licenseRefs = licenseItems.map(() =>
       db.collection("licenses").doc(generateLicenseCode()),
@@ -1372,6 +1312,8 @@ app.post("/create-order", async (req, res) => {
   }
 });
 
+
+
 // ════════════════════════════════════════════════════════════════════════
 //  وبهوک Lemon Squeezy → ساخت خودکار لایسنس + ایمیل به خریدار
 // ════════════════════════════════════════════════════════════════════════
@@ -1400,10 +1342,7 @@ app.post(
         return res.status(401).json({ error: "missing signature" });
       }
 
-      const hmac = crypto.createHmac(
-        "sha256",
-        process.env.LEMON_WEBHOOK_SECRET,
-      );
+      const hmac = crypto.createHmac("sha256", process.env.LEMON_WEBHOOK_SECRET);
       const digest = Buffer.from(hmac.update(req.body).digest("hex"), "utf8");
       const received = Buffer.from(signature, "utf8");
 
@@ -1460,10 +1399,7 @@ app.post(
         const existing = await tx.get(orderRef);
         if (existing.exists) {
           // این orderId قبلاً پردازش شده (وبهوک تکراری) — چیزی نساز
-          return {
-            alreadyProcessed: true,
-            licenseCode: existing.data().licenseCode,
-          };
+          return { alreadyProcessed: true, licenseCode: existing.data().licenseCode };
         }
 
         tx.set(db.collection("licenses").doc(licenseCode), {
@@ -1562,9 +1498,7 @@ app.post("/myket/verify-purchase", async (req, res) => {
 
     if (!MYKET_ACCESS_TOKEN) {
       console.error("مایکت: متغیر محیطی MYKET_ACCESS_TOKEN تنظیم نشده");
-      return res
-        .status(500)
-        .json({ success: false, error: "Server misconfigured" });
+      return res.status(500).json({ success: false, error: "Server misconfigured" });
     }
 
     // ── idempotency: این purchaseToken قبلاً پردازش شده؟ ─────────────
@@ -1619,16 +1553,12 @@ app.post("/myket/verify-purchase", async (req, res) => {
       }
     } catch (err) {
       console.error("مایکت: خطا در اتصال به verify API:", err);
-      return res
-        .status(502)
-        .json({ success: false, error: "Could not reach Myket" });
+      return res.status(502).json({ success: false, error: "Could not reach Myket" });
     }
 
     // طبق مستندات مایکت: purchaseState === 0 یعنی خرید موفق
     if (myketData.purchaseState !== 0) {
-      return res
-        .status(403)
-        .json({ success: false, error: "Purchase not successful" });
+      return res.status(403).json({ success: false, error: "Purchase not successful" });
     }
 
     // ── ساخت لایسنس + ثبت idempotency، هر دو در یک تراکنش ─────────────
@@ -1665,22 +1595,9 @@ app.post("/myket/verify-purchase", async (req, res) => {
       });
     });
 
-    await linkDevice(
-      fingerprint,
-      appId,
-      licenseType,
-      licenseCode,
-      appGeneration,
-    );
+    await linkDevice(fingerprint, appId, licenseType, licenseCode, appGeneration);
 
-    const token = createSignedToken(
-      fingerprint,
-      appId,
-      licenseCode,
-      licenseType,
-      null,
-      tier,
-    );
+    const token = createSignedToken(fingerprint, appId, licenseCode, licenseType, null, tier);
 
     return res.status(200).json({
       success: true,
@@ -1697,41 +1614,35 @@ app.post("/myket/verify-purchase", async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════════════
-//  تایید خرید گوگل پلی → ساخت خودکار و فعال‌سازی فوری لایسنس
+//  تایید خرید کافه‌بازار → ساخت خودکار و فعال‌سازی فوری لایسنس
 // ════════════════════════════════════════════════════════════════════════
 // دقیقاً همون الگوی /myket/verify-purchase بالا، با دو فرق:
-//   ۱) گوگل پلی به‌جای یک توکن ثابت، از Service Account استفاده می‌کنه
-//      (getGooglePlayAccessToken).
-//   ۲) آدرس و ساختار verify API فرق داره (Google Play Developer API v3،
-//      GET با Bearer token).
+//   ۱) بازار به‌جای یک توکن ثابت، از OAuth2 استفاده می‌کنه (getBazaarAccessToken).
+//   ۲) آدرس و ساختار verify API فرق داره (GET با Bearer token، نه POST).
 // جریان کار:
-//   ۱) productId رو از GOOGLE_PLAY_SKU_LICENSE_MAP (نگاشتِ امنِ سمت سرور)
-//      به tier/duration تبدیل می‌کنیم — اگه محصول ناشناخته بود، رد می‌کنیم.
+//   ۱) skuId رو از BAZAAR_SKU_LICENSE_MAP (نگاشتِ امنِ سمت سرور) به
+//      tier/duration تبدیل می‌کنیم — اگه sku ناشناخته بود، رد می‌کنیم.
 //   ۲) چک می‌کنیم این purchaseToken قبلاً پردازش نشده باشه (idempotency).
-//   ۳) از سرور (نه کلاینت) به Google Play Developer API وصل می‌شیم و
-//      purchaseState رو چک می‌کنیم — طبق مستندات گوگل 0 یعنی موفق.
-//   ۴) اگه هنوز acknowledge نشده، همینجا acknowledge می‌کنیم (وگرنه گوگل
-//      پلی ظرف ۳ روز خودکار پول رو برمی‌گردونه؛ کلاینت هم تلاش می‌کنه این
-//      کار رو بکنه، ولی این‌جا هم انجامش می‌دیم تا اگه کلاینت قبل از اون
-//      موفق نشد، باز هم پوشش داشته باشیم).
-//   ۵) در صورت موفقیت، بلافاصله لایسنس مادام‌العمر می‌سازیم، به همین
+//   ۳) از سرور (نه کلاینت) به Bazaar Purchase Validate API وصل می‌شیم و
+//      purchaseState رو چک می‌کنیم — طبق مستندات بازار 0 یعنی موفق.
+//   ۴) در صورت موفقیت، بلافاصله لایسنس مادام‌العمر می‌سازیم، به همین
 //      fingerprint/appId گره می‌زنیم، و یک توکن امضاشده برمی‌گردونیم —
 //      دقیقاً همون ساختار پاسخ /activate و /myket/verify-purchase.
-app.post("/googleplay/verify-purchase", async (req, res) => {
+app.post("/bazaar/verify-purchase", async (req, res) => {
   try {
     const {
       purchaseToken,
-      productId,
+      skuId,
       fingerprint,
       appId,
       hardwareSignature,
       appGeneration,
     } = req.body;
 
-    if (!purchaseToken || !productId || !fingerprint || !appId) {
+    if (!purchaseToken || !skuId || !fingerprint || !appId) {
       return res.status(400).json({
         success: false,
-        error: "purchaseToken, productId, fingerprint and appId are required",
+        error: "purchaseToken, skuId, fingerprint and appId are required",
       });
     }
 
@@ -1739,15 +1650,15 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
       return res.status(400).json({ success: false, error: "Unknown appId" });
     }
 
-    const info = GOOGLE_PLAY_SKU_LICENSE_MAP[productId];
+    const info = BAZAAR_SKU_LICENSE_MAP[skuId];
     if (!info) {
-      console.error(`گوگل پلی: productId ناشناخته (${productId})`);
+      console.error(`بازار: skuId ناشناخته (${skuId})`);
       return res.status(400).json({ success: false, error: "Unknown product" });
     }
 
     // ── idempotency: این purchaseToken قبلاً پردازش شده؟ ─────────────
     // (چه به‌خاطر retry شبکه‌ای کلاینت، چه سوءاستفاده‌ی عمدی از یک توکن قدیمی)
-    const purchaseRef = db.collection("googlePlayPurchases").doc(purchaseToken);
+    const purchaseRef = db.collection("bazaarPurchases").doc(purchaseToken);
     const existingPurchase = await purchaseRef.get();
     if (existingPurchase.exists) {
       const prev = existingPurchase.data();
@@ -1769,68 +1680,38 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
       });
     }
 
-    // ── صحت‌سنجی خرید با Google Play Developer API (server-to-server) ─
-    // طبق مستندات رسمی گوگل (Android Publisher API v3 → purchases.products.get):
-    // GET با Authorization: Bearer {access_token} روی
-    // /androidpublisher/v3/applications/{packageName}/purchases/products/{productId}/tokens/{token}
-    let purchaseData;
+    // ── صحت‌سنجی خرید با سرور بازار (server-to-server) ───────────────
+    // طبق مستندات رسمی بازار (developers.cafebazaar.ir → Developer API v2
+    // → purchase validation): GET با Authorization: Bearer {access_token}
+    // روی /devapi/v2/api/validate/{packageName}/inapp/{productId}/purchases/{purchaseToken}/
+    let bazaarData;
     try {
-      const accessToken = await getGooglePlayAccessToken();
-      const verifyUrl = `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${encodeURIComponent(
+      const accessToken = await getBazaarAccessToken();
+      const verifyUrl = `https://pardakht.cafebazaar.ir/devapi/v2/api/validate/${encodeURIComponent(
         appId,
-      )}/purchases/products/${encodeURIComponent(
-        productId,
-      )}/tokens/${encodeURIComponent(purchaseToken)}`;
-      const googleRes = await fetch(verifyUrl, {
+      )}/inapp/${encodeURIComponent(skuId)}/purchases/${encodeURIComponent(
+        purchaseToken,
+      )}/`;
+      const bazaarRes = await fetch(verifyUrl, {
         method: "GET",
         headers: { Authorization: `Bearer ${accessToken}` },
       });
-      purchaseData = await googleRes.json();
-      if (!googleRes.ok || purchaseData.error) {
-        console.error("گوگل پلی: خطای verify API:", purchaseData);
+      bazaarData = await bazaarRes.json();
+      if (!bazaarRes.ok || bazaarData.error) {
+        console.error("بازار: خطای verify API:", bazaarData);
         return res.status(502).json({
           success: false,
-          error: purchaseData?.error?.message || "Purchase verification failed",
+          error: bazaarData?.error_description || "Purchase verification failed",
         });
       }
     } catch (err) {
-      console.error("گوگل پلی: خطا در اتصال به verify API:", err);
-      return res
-        .status(502)
-        .json({ success: false, error: "Could not reach Google Play" });
+      console.error("بازار: خطا در اتصال به verify API:", err);
+      return res.status(502).json({ success: false, error: "Could not reach Bazaar" });
     }
 
-    // طبق مستندات گوگل: purchaseState === 0 یعنی خرید موفق (1 = لغوشده، 2 = در انتظار)
-    if (purchaseData.purchaseState !== 0) {
-      return res
-        .status(403)
-        .json({ success: false, error: "Purchase not successful" });
-    }
-
-    // ── acknowledge خرید سمت سرور، اگه کلاینت هنوز این کار رو نکرده ────
-    // acknowledgementState: 0 = تاییدنشده، 1 = تاییدشده
-    if (purchaseData.acknowledgementState === 0) {
-      try {
-        const accessToken = await getGooglePlayAccessToken();
-        const ackUrl = `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${encodeURIComponent(
-          appId,
-        )}/purchases/products/${encodeURIComponent(
-          productId,
-        )}/tokens/${encodeURIComponent(purchaseToken)}:acknowledge`;
-        await fetch(ackUrl, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({}),
-        });
-      } catch (err) {
-        // اگه acknowledge سمت سرور شکست بخوره، مشکلی نیست — کلاینت هم
-        // سعی می‌کنه acknowledge کنه؛ فقط لاگ می‌کنیم و ادامه می‌دیم چون
-        // خودِ فعال‌سازی لایسنس نباید به این وابسته باشه.
-        console.error("گوگل پلی: خطا در acknowledge سمت سرور:", err);
-      }
+    // طبق مستندات بازار: purchaseState === 0 یعنی خرید موفق
+    if (bazaarData.purchaseState !== 0) {
+      return res.status(403).json({ success: false, error: "Purchase not successful" });
     }
 
     // ── ساخت لایسنس + ثبت idempotency، هر دو در یک تراکنش ─────────────
@@ -1848,16 +1729,16 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
         fingerprint,
         appId,
         hardwareSignature: hardwareSignature || null,
-        source: "google_play",
-        google_play_product_id: productId,
-        google_play_purchase_token: purchaseToken,
+        source: "bazaar",
+        bazaar_sku_id: skuId,
+        bazaar_purchase_token: purchaseToken,
         activated_at: admin.firestore.FieldValue.serverTimestamp(),
         expires_at: null, // فقط lifetime می‌فروشیم
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
       tx.set(purchaseRef, {
-        productId,
+        skuId,
         fingerprint,
         appId,
         licenseCode,
@@ -1867,22 +1748,9 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
       });
     });
 
-    await linkDevice(
-      fingerprint,
-      appId,
-      licenseType,
-      licenseCode,
-      appGeneration,
-    );
+    await linkDevice(fingerprint, appId, licenseType, licenseCode, appGeneration);
 
-    const token = createSignedToken(
-      fingerprint,
-      appId,
-      licenseCode,
-      licenseType,
-      null,
-      tier,
-    );
+    const token = createSignedToken(fingerprint, appId, licenseCode, licenseType, null, tier);
 
     return res.status(200).json({
       success: true,
@@ -1893,7 +1761,7 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
       expiresAt: null,
     });
   } catch (err) {
-    console.error("خطا در تایید خرید گوگل پلی:", err);
+    console.error("خطا در تایید خرید بازار:", err);
     return res.status(500).json({ success: false, error: "Server error" });
   }
 });
@@ -1966,13 +1834,7 @@ app.post("/activate", async (req, res) => {
             expiresAt,
             tier,
           );
-          await linkDevice(
-            fingerprint,
-            appId,
-            licenseType,
-            licenseCode,
-            appGeneration,
-          );
+          await linkDevice(fingerprint, appId, licenseType, licenseCode, appGeneration);
           return res.status(200).json({
             success: true,
             token,
@@ -2017,21 +1879,10 @@ app.post("/activate", async (req, res) => {
         expiresAt,
         tier,
       );
-      await linkDevice(
-        fingerprint,
-        appId,
-        licenseType,
-        licenseCode,
-        appGeneration,
-      );
-      return res.status(200).json({
-        success: true,
-        token,
-        licenseType,
-        tier,
-        licenseCode,
-        expiresAt,
-      });
+      await linkDevice(fingerprint, appId, licenseType, licenseCode, appGeneration);
+      return res
+        .status(200)
+        .json({ success: true, token, licenseType, tier, licenseCode, expiresAt });
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -2063,17 +1914,12 @@ app.post("/activate", async (req, res) => {
 
         if (freshData.is_used) {
           // حالا هم fingerprint هم appId باید مچ باشن
-          if (
-            freshData.fingerprint === fingerprint &&
-            freshData.appId === appId
-          ) {
+          if (freshData.fingerprint === fingerprint && freshData.appId === appId) {
             const expiresAt = freshData.expires_at
               ? freshData.expires_at.toMillis()
               : null;
             if (expiresAt !== null && Date.now() > expiresAt) {
-              throw Object.assign(new Error("expired"), {
-                isActivateErr: true,
-              });
+              throw Object.assign(new Error("expired"), { isActivateErr: true });
             }
             return { expiresAt };
           }
@@ -2149,13 +1995,7 @@ app.post("/activate", async (req, res) => {
       txResult.expiresAt,
       tier,
     );
-    await linkDevice(
-      fingerprint,
-      appId,
-      licenseType,
-      licenseCode,
-      appGeneration,
-    );
+    await linkDevice(fingerprint, appId, licenseType, licenseCode, appGeneration);
     return res.status(200).json({
       success: true,
       token,
@@ -2200,11 +2040,7 @@ app.post("/signin", async (req, res) => {
 
     // ── اعلام ورژن/آپدیت: مستقل از وضعیت لایسنس، همراه هر پاسخ برمی‌گرده ──
     const versionDoc = await getVersionDoc(appId);
-    const versionInfo = buildVersionInfo(
-      versionDoc,
-      currentVersion,
-      currentUpdate,
-    );
+    const versionInfo = buildVersionInfo(versionDoc, currentVersion, currentUpdate);
 
     const safeId = deviceAppId(fingerprint, appId);
     const deviceRef = db.collection("devices").doc(safeId);
@@ -2466,20 +2302,14 @@ app.post("/logout", async (req, res) => {
 async function requireAdmin(req, res, next) {
   try {
     const authHeader = req.headers.authorization || "";
-    const idToken = authHeader.startsWith("Bearer ")
-      ? authHeader.slice(7)
-      : null;
+    const idToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
     if (!idToken) {
-      return res
-        .status(401)
-        .json({ status: "error", error: "توکن ورود ارسال نشده" });
+      return res.status(401).json({ status: "error", error: "توکن ورود ارسال نشده" });
     }
     await admin.auth().verifyIdToken(idToken);
     next();
   } catch (err) {
-    return res
-      .status(401)
-      .json({ status: "error", error: "دسترسی نامعتبر یا خطای سرور" });
+    return res.status(401).json({ status: "error", error: "دسترسی نامعتبر یا خطای سرور" });
   }
 }
 
@@ -2502,49 +2332,41 @@ app.post("/admin/announce-version", requireAdmin, async (req, res) => {
       return res.status(400).json({ status: "error", error: "Unknown appId" });
     }
     if (!version || !Number.isFinite(Number(version)) || Number(version) <= 0) {
-      return res
-        .status(400)
-        .json({ status: "error", error: "Invalid version number" });
+      return res.status(400).json({ status: "error", error: "Invalid version number" });
     }
     if (versionType !== "free" && versionType !== "paid") {
-      return res.status(400).json({
-        status: "error",
-        error: "versionType must be 'free' or 'paid'",
-      });
+      return res
+        .status(400)
+        .json({ status: "error", error: "versionType must be 'free' or 'paid'" });
     }
     if (versionType === "free" && !versionDownloadUrl) {
-      return res.status(400).json({
-        status: "error",
-        error: "versionDownloadUrl is required for a free version",
-      });
+      return res
+        .status(400)
+        .json({ status: "error", error: "versionDownloadUrl is required for a free version" });
     }
     if (versionType === "paid" && !versionPurchaseUrl) {
-      return res.status(400).json({
-        status: "error",
-        error: "versionPurchaseUrl is required for a paid version",
-      });
+      return res
+        .status(400)
+        .json({ status: "error", error: "versionPurchaseUrl is required for a paid version" });
     }
 
-    await db
-      .collection("appVersions")
-      .doc(appId)
-      .set(
-        {
-          version: Number(version),
-          versionType,
-          versionDownloadUrl: versionDownloadUrl || null,
-          versionPurchaseUrl: versionPurchaseUrl || null,
-          versionNotes: versionNotes || "",
-          // اعلام ورژن جدید یعنی آپدیت‌های ورژن قبلی دیگه بی‌معنی‌ان
-          update: 0,
-          updateType: "free",
-          updateDownloadUrl: null,
-          updatePurchaseUrl: null,
-          updateNotes: "",
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        },
-        { merge: true },
-      );
+    await db.collection("appVersions").doc(appId).set(
+      {
+        version: Number(version),
+        versionType,
+        versionDownloadUrl: versionDownloadUrl || null,
+        versionPurchaseUrl: versionPurchaseUrl || null,
+        versionNotes: versionNotes || "",
+        // اعلام ورژن جدید یعنی آپدیت‌های ورژن قبلی دیگه بی‌معنی‌ان
+        update: 0,
+        updateType: "free",
+        updateDownloadUrl: null,
+        updatePurchaseUrl: null,
+        updateNotes: "",
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
 
     return res.status(200).json({ status: "ok" });
   } catch (err) {
@@ -2572,27 +2394,22 @@ app.post("/admin/announce-update", requireAdmin, async (req, res) => {
       return res.status(400).json({ status: "error", error: "Unknown appId" });
     }
     if (!update || !Number.isFinite(Number(update)) || Number(update) <= 0) {
-      return res
-        .status(400)
-        .json({ status: "error", error: "Invalid update number" });
+      return res.status(400).json({ status: "error", error: "Invalid update number" });
     }
     if (updateType !== "free" && updateType !== "paid") {
-      return res.status(400).json({
-        status: "error",
-        error: "updateType must be 'free' or 'paid'",
-      });
+      return res
+        .status(400)
+        .json({ status: "error", error: "updateType must be 'free' or 'paid'" });
     }
     if (updateType === "free" && !updateDownloadUrl) {
-      return res.status(400).json({
-        status: "error",
-        error: "updateDownloadUrl is required for a free update",
-      });
+      return res
+        .status(400)
+        .json({ status: "error", error: "updateDownloadUrl is required for a free update" });
     }
     if (updateType === "paid" && !updatePurchaseUrl) {
-      return res.status(400).json({
-        status: "error",
-        error: "updatePurchaseUrl is required for a paid update",
-      });
+      return res
+        .status(400)
+        .json({ status: "error", error: "updatePurchaseUrl is required for a paid update" });
     }
 
     const ref = db.collection("appVersions").doc(appId);
@@ -2600,8 +2417,7 @@ app.post("/admin/announce-update", requireAdmin, async (req, res) => {
     if (!existing.exists) {
       return res.status(400).json({
         status: "error",
-        error:
-          "No version announced yet for this appId — call /admin/announce-version first.",
+        error: "No version announced yet for this appId — call /admin/announce-version first.",
       });
     }
 
@@ -2648,9 +2464,7 @@ app.post("/admin/mark-paid", requireAdmin, async (req, res) => {
   try {
     const rawLicenseCode = req.body?.licenseCode;
     if (!rawLicenseCode || typeof rawLicenseCode !== "string") {
-      return res
-        .status(400)
-        .json({ status: "error", error: "licenseCode الزامی است" });
+      return res.status(400).json({ status: "error", error: "licenseCode الزامی است" });
     }
     const licenseCode = rawLicenseCode.trim().toUpperCase();
     const licenseRef = db.collection("licenses").doc(licenseCode);
@@ -2658,10 +2472,7 @@ app.post("/admin/mark-paid", requireAdmin, async (req, res) => {
     const result = await db.runTransaction(async (tx) => {
       const licenseDoc = await tx.get(licenseRef);
       if (!licenseDoc.exists) {
-        throw Object.assign(new Error("not-found"), {
-          httpStatus: 404,
-          msg: "کد لایسنس پیدا نشد",
-        });
+        throw Object.assign(new Error("not-found"), { httpStatus: 404, msg: "کد لایسنس پیدا نشد" });
       }
 
       const data = licenseDoc.data();
@@ -2676,9 +2487,7 @@ app.post("/admin/mark-paid", requireAdmin, async (req, res) => {
       const oldType = data.license_type ?? "lifetime";
       const wasActivated = !!(data.is_used && data.fingerprint && data.appId);
       const deviceRef = wasActivated
-        ? db
-            .collection("devices")
-            .doc(deviceAppId(data.fingerprint, data.appId))
+        ? db.collection("devices").doc(deviceAppId(data.fingerprint, data.appId))
         : null;
 
       // ── ثبت پرداخت + ارتقا روی سند لایسنس ───────────────────────────
@@ -2687,10 +2496,7 @@ app.post("/admin/mark-paid", requireAdmin, async (req, res) => {
         paidAt: admin.firestore.FieldValue.serverTimestamp(),
         license_type: "lifetime",
         expires_at: null,
-        upgradedFrom:
-          oldType === "lifetime"
-            ? admin.firestore.FieldValue.delete()
-            : oldType,
+        upgradedFrom: oldType === "lifetime" ? admin.firestore.FieldValue.delete() : oldType,
         upgradedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
@@ -2726,10 +2532,7 @@ app.post("/admin/mark-paid", requireAdmin, async (req, res) => {
         });
       }
     } catch (reqErr) {
-      console.error(
-        "خطا در بروزرسانی licenseRequests بعد از mark-paid:",
-        reqErr,
-      );
+      console.error("خطا در بروزرسانی licenseRequests بعد از mark-paid:", reqErr);
     }
 
     return res.status(200).json({
@@ -2741,9 +2544,7 @@ app.post("/admin/mark-paid", requireAdmin, async (req, res) => {
     });
   } catch (err) {
     if (err.httpStatus) {
-      return res
-        .status(err.httpStatus)
-        .json({ status: "error", error: err.msg });
+      return res.status(err.httpStatus).json({ status: "error", error: err.msg });
     }
     console.error("خطا در mark-paid:", err);
     return res.status(500).json({ status: "error", error: "Server error" });
@@ -2840,9 +2641,7 @@ app.delete("/admin/discount/:code", async (req, res) => {
 
     const { code } = req.params;
     if (!code) {
-      return res
-        .status(400)
-        .json({ status: "error", error: "کد تخفیف نامعتبر" });
+      return res.status(400).json({ status: "error", error: "کد تخفیف نامعتبر" });
     }
 
     await db.collection("discountCodes").doc(code).delete();
@@ -2877,12 +2676,7 @@ app.get("/rates/latest", (req, res) => {
 app.post("/admin/refresh-rates", requireAdmin, async (req, res) => {
   const [usdTry, usdIrr] = await Promise.all([
     runRateJob("usdTry", USD_TRY_SOURCES, applyUsdTryResult, "نرخ دلار/لیر"),
-    runRateJob(
-      "usdIrr",
-      USD_IRR_SOURCES,
-      applyUsdIrrResult,
-      "نرخ دلار/ریال بازار آزاد",
-    ),
+    runRateJob("usdIrr", USD_IRR_SOURCES, applyUsdIrrResult, "نرخ دلار/ریال بازار آزاد"),
   ]);
 
   const allFailed = !usdTry.success && !usdIrr.success;
