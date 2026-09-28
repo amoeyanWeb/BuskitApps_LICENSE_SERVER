@@ -2054,6 +2054,7 @@ app.post("/activate", async (req, res) => {
       const userRef = licenseRef.collection("users").doc(safeId);
       const userDoc = await userRef.get();
 
+      console.log(`[activate] trial ${licenseCode} device=${safeId.slice(0, 8)} record_exists=${userDoc.exists}`);
       if (userDoc.exists) {
         const userData = userDoc.data();
         const expiresAt = userData.expires_at
@@ -2087,6 +2088,7 @@ app.post("/activate", async (req, res) => {
       }
 
       // اولین بار این ترکیب «دستگاه + اپ» میاد سراغ trial → ثبت کن
+      console.log(`[activate] NEW trial record created for device=${safeId.slice(0, 8)}`);
       const now = Date.now();
       const expiresAt = durationMs !== null ? now + durationMs : null;
       const expiresAtFirestore =
@@ -2474,6 +2476,7 @@ app.post("/logout", async (req, res) => {
       }
       // هیچ حذفی روی userRef انجام نمی‌شه؛ فقط پاک‌سازی لینک دستگاه
       // (links.5days) پایین‌تر انجام می‌شه.
+      console.log(`[logout] trial record KEPT for device=${safeId.slice(0, 8)}`);
     } else {
       // ════════════════════════════════════════════════════════════
       // حالت ۲: لایسنس اختصاصی — دقیقاً هم‌ساختار با تراکنش /activate
