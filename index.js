@@ -524,7 +524,11 @@ const AUTO_LIFETIME_GAP_MS = 90 * 24 * 60 * 60 * 1000; // ۳ ماه
 // نشه. هروقت اون دو اپ هم واقعاً آماده شدن، applicationId درستشون رو
 // دوباره به همین آرایه اضافه کن. اگه appId ارسالی توی این لیست نباشه
 // درخواست رد میشه (جلوی سوءاستفاده با appId جعلی رو هم می‌گیره).
-const ALLOWED_APP_IDS = ["com.BuskitApp.Tools"];
+// com.GPLBuskitTools = نسخه‌ی گوگل پلی (applicationId واقعی روی Play Console).
+// چون کلاینت appId رو از context.packageName می‌فرسته، همین مقدار هم کلید
+// لایسنس/دستگاه روی سرور هست و هم packageName ای که به Google Play Developer
+// API داده می‌شه. com.BuskitApp.Tools هم برای بقیه‌ی اپ‌ها مثل قبل کار می‌کنه.
+const ALLOWED_APP_IDS = ["com.BuskitApp.Tools", "com.GPLBuskitTools"];
 
 // ── fingerprint رو برای Firestore document ID ایمن کن ────────────────────
 function toSafeId(fingerprint) {
