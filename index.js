@@ -92,7 +92,9 @@ async function fetchRatesFromYekrial() {
   const usdToman = extractYekrialTomanPrice(html, "USD");
   const tryToman = extractYekrialTomanPrice(html, "TRY");
   if (!usdToman || !tryToman) {
-    throw new Error("yekrial.com: قیمت دلار یا لیر در صفحه پیدا نشد (شاید ساختار صفحه تغییر کرده)");
+    throw new Error(
+      "yekrial.com: قیمت دلار یا لیر در صفحه پیدا نشد (شاید ساختار صفحه تغییر کرده)",
+    );
   }
 
   const data = {
@@ -114,29 +116,44 @@ async function fetchUsdIrrFromYekrial() {
 
 // ── منبع ۲ برای نرخ دلار/لیر: doviz.com ────────────────────────────────────
 async function fetchUsdTryFromDovizCom() {
-  const res = await fetch("https://www.doviz.com/api/v1/currencies/all/latest", {
-    headers: { "User-Agent": "Mozilla/5.0 (compatible; BuskitRateBot/1.0)" },
-  });
+  const res = await fetch(
+    "https://www.doviz.com/api/v1/currencies/all/latest",
+    {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; BuskitRateBot/1.0)" },
+    },
+  );
   if (!res.ok) throw new Error(`doviz.com پاسخ HTTP ${res.status} داد`);
   const json = await res.json();
-  const list = Array.isArray(json) ? json : json?.data || Object.values(json || {});
+  const list = Array.isArray(json)
+    ? json
+    : json?.data || Object.values(json || {});
   const usdItem = list.find(
-    (it) => (it?.code || it?.symbol || it?.Symbol || "").toString().toUpperCase() === "USD",
+    (it) =>
+      (it?.code || it?.symbol || it?.Symbol || "").toString().toUpperCase() ===
+      "USD",
   );
-  const buy = Number(usdItem?.buying ?? usdItem?.buy ?? usdItem?.Alis ?? usdItem?.alis);
-  const sell = Number(usdItem?.selling ?? usdItem?.sell ?? usdItem?.Satis ?? usdItem?.satis);
+  const buy = Number(
+    usdItem?.buying ?? usdItem?.buy ?? usdItem?.Alis ?? usdItem?.alis,
+  );
+  const sell = Number(
+    usdItem?.selling ?? usdItem?.sell ?? usdItem?.Satis ?? usdItem?.satis,
+  );
   const rate = buy > 0 && sell > 0 ? (buy + sell) / 2 : Number(buy || sell);
-  if (!rate || Number.isNaN(rate)) throw new Error("doviz.com: نرخ USD در پاسخ پیدا نشد");
+  if (!rate || Number.isNaN(rate))
+    throw new Error("doviz.com: نرخ USD در پاسخ پیدا نشد");
   return rate; // ۱ دلار = rate لیر
 }
 
 // ── منبع ۳ برای نرخ دلار/لیر: Frankfurter (نرخ رسمی بانک مرکزی اروپا) ──────
 async function fetchUsdTryFromFrankfurter() {
-  const res = await fetch("https://api.frankfurter.dev/v1/latest?base=USD&symbols=TRY");
+  const res = await fetch(
+    "https://api.frankfurter.dev/v1/latest?base=USD&symbols=TRY",
+  );
   if (!res.ok) throw new Error(`Frankfurter پاسخ HTTP ${res.status} داد`);
   const json = await res.json();
   const rate = Number(json?.rates?.TRY);
-  if (!rate || Number.isNaN(rate)) throw new Error("Frankfurter: نرخ TRY در پاسخ پیدا نشد");
+  if (!rate || Number.isNaN(rate))
+    throw new Error("Frankfurter: نرخ TRY در پاسخ پیدا نشد");
   return rate;
 }
 
@@ -148,22 +165,32 @@ async function fetchUsdIrrFromBonbast() {
   const json = await res.json();
   const buyToman = Number(json?.usd1 ?? json?.usd_sell ?? json?.usd?.sell);
   const sellToman = Number(json?.usd2 ?? json?.usd_buy ?? json?.usd?.buy);
-  const toman = buyToman > 0 && sellToman > 0 ? (buyToman + sellToman) / 2 : Number(buyToman || sellToman);
-  if (!toman || Number.isNaN(toman)) throw new Error("bonbast: نرخ usd در پاسخ پیدا نشد");
+  const toman =
+    buyToman > 0 && sellToman > 0
+      ? (buyToman + sellToman) / 2
+      : Number(buyToman || sellToman);
+  if (!toman || Number.isNaN(toman))
+    throw new Error("bonbast: نرخ usd در پاسخ پیدا نشد");
   return toman * 10; // تومان → ریال
 }
 
 // ── منبع ۳ برای نرخ دلار/ریال بازار آزاد: brsapi (رایگان) ─────────────────
 async function fetchUsdIrrFromBrsApi() {
-  const res = await fetch("https://BrsApi.ir/FreeTsetmcBourseApi/Api_Free_Gold_Currency_v2.json");
+  const res = await fetch(
+    "https://BrsApi.ir/FreeTsetmcBourseApi/Api_Free_Gold_Currency_v2.json",
+  );
   if (!res.ok) throw new Error(`brsapi پاسخ HTTP ${res.status} داد`);
   const json = await res.json();
   const list = json?.currency || json?.Currency || [];
   const usdItem = list.find((it) =>
-    (it?.symbol || it?.name_en || it?.Symbol || "").toString().toUpperCase().includes("USD"),
+    (it?.symbol || it?.name_en || it?.Symbol || "")
+      .toString()
+      .toUpperCase()
+      .includes("USD"),
   );
   const toman = Number(usdItem?.price ?? usdItem?.Price);
-  if (!toman || Number.isNaN(toman)) throw new Error("brsapi: نرخ usd در پاسخ پیدا نشد");
+  if (!toman || Number.isNaN(toman))
+    throw new Error("brsapi: نرخ usd در پاسخ پیدا نشد");
   return toman * 10; // تومان → ریال
 }
 
@@ -224,7 +251,9 @@ async function runRateJob(jobKey, sources, applyResult, label) {
     const { value, source } = await fetchFirstSuccessful(sources);
     applyResult(value, source);
     await persistRatesToFirestore();
-    console.log(`[نرخ ارز] ${label} با موفقیت از «${source}» گرفته شد: ${value}`);
+    console.log(
+      `[نرخ ارز] ${label} با موفقیت از «${source}» گرفته شد: ${value}`,
+    );
     return { success: true, value, source };
   } catch (err) {
     console.error(
@@ -265,7 +294,14 @@ function msUntilNextIstanbulTime(hour, minute) {
   }).formatToParts(now);
   const get = (type) => Number(parts.find((p) => p.type === type).value);
   const istNow = new Date(
-    Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"), get("second")),
+    Date.UTC(
+      get("year"),
+      get("month") - 1,
+      get("day"),
+      get("hour"),
+      get("minute"),
+      get("second"),
+    ),
   );
   const target = new Date(istNow);
   target.setUTCHours(hour, minute, 0, 0);
@@ -273,7 +309,14 @@ function msUntilNextIstanbulTime(hour, minute) {
   return target.getTime() - istNow.getTime();
 }
 
-function scheduleDailyRateJob(hour, minute, jobKey, sources, applyResult, label) {
+function scheduleDailyRateJob(
+  hour,
+  minute,
+  jobKey,
+  sources,
+  applyResult,
+  label,
+) {
   const delay = msUntilNextIstanbulTime(hour, minute);
   console.log(
     `[نرخ ارز] زمان‌بندی ${label}: اولین اجرا تا ${Math.round(delay / 60000)} دقیقه‌ی دیگر ` +
@@ -281,7 +324,10 @@ function scheduleDailyRateJob(hour, minute, jobKey, sources, applyResult, label)
   );
   setTimeout(function runAndReschedule() {
     runRateJob(jobKey, sources, applyResult, label);
-    setInterval(() => runRateJob(jobKey, sources, applyResult, label), 24 * 60 * 60 * 1000);
+    setInterval(
+      () => runRateJob(jobKey, sources, applyResult, label),
+      24 * 60 * 60 * 1000,
+    );
   }, delay);
 }
 
@@ -301,16 +347,21 @@ async function initRatesSystem() {
       if (data.usdToTry) {
         latestRates.usdToTry = data.usdToTry;
         latestRates.usdToTrySource = data.usdToTrySource || null;
-        latestRates.usdToTryUpdatedAt = data.usdToTryUpdatedAt?.toDate?.() || null;
+        latestRates.usdToTryUpdatedAt =
+          data.usdToTryUpdatedAt?.toDate?.() || null;
       }
       if (data.usdToIrr) {
         latestRates.usdToIrr = data.usdToIrr;
         latestRates.usdToIrrSource = data.usdToIrrSource || null;
-        latestRates.usdToIrrUpdatedAt = data.usdToIrrUpdatedAt?.toDate?.() || null;
+        latestRates.usdToIrrUpdatedAt =
+          data.usdToIrrUpdatedAt?.toDate?.() || null;
       }
     }
   } catch (err) {
-    console.error("[نرخ ارز] خواندن نرخ ذخیره‌شده از Firestore ناموفق بود:", err.message);
+    console.error(
+      "[نرخ ارز] خواندن نرخ ذخیره‌شده از Firestore ناموفق بود:",
+      err.message,
+    );
   }
 
   // اگر سرور همین امروز ری‌استارت شده و نرخ امروز هنوز گرفته نشده، یک تلاش فوری بزن
@@ -318,11 +369,30 @@ async function initRatesSystem() {
     runRateJob("usdTry", USD_TRY_SOURCES, applyUsdTryResult, "نرخ دلار/لیر");
   }
   if (!isUpdatedToday(latestRates.usdToIrrUpdatedAt)) {
-    runRateJob("usdIrr", USD_IRR_SOURCES, applyUsdIrrResult, "نرخ دلار/ریال بازار آزاد");
+    runRateJob(
+      "usdIrr",
+      USD_IRR_SOURCES,
+      applyUsdIrrResult,
+      "نرخ دلار/ریال بازار آزاد",
+    );
   }
 
-  scheduleDailyRateJob(13, 0, "usdTry", USD_TRY_SOURCES, applyUsdTryResult, "نرخ دلار/لیر");
-  scheduleDailyRateJob(15, 0, "usdIrr", USD_IRR_SOURCES, applyUsdIrrResult, "نرخ دلار/ریال بازار آزاد");
+  scheduleDailyRateJob(
+    13,
+    0,
+    "usdTry",
+    USD_TRY_SOURCES,
+    applyUsdTryResult,
+    "نرخ دلار/لیر",
+  );
+  scheduleDailyRateJob(
+    15,
+    0,
+    "usdIrr",
+    USD_IRR_SOURCES,
+    applyUsdIrrResult,
+    "نرخ دلار/ریال بازار آزاد",
+  );
 }
 
 initRatesSystem();
@@ -432,7 +502,6 @@ async function getBazaarAccessToken() {
   };
   return bazaarTokenCache.accessToken;
 }
-
 
 // ── سرویس ایمیل (Brevo — از طریق HTTP API، نه SMTP) ──────────────────────
 // چرا Brevo به‌جای Gmail SMTP: Render (پلن رایگان) پورت‌های خروجی SMTP
@@ -714,7 +783,11 @@ const LS_VARIANT_LICENSE_MAP = {
 // مایکت ساختی (و همون چیزی که کلاینت در MYKET_SKU_LIFETIME می‌فرسته).
 // عمداً سمت سرور نگه داشته می‌شه، نه چیزی که از body درخواست خونده بشه.
 const MYKET_SKU_LICENSE_MAP = {
-  buskit_lifetime: { tier: "gold", license_type: "lifetime", appGeneration: "v1" },
+  buskit_lifetime: {
+    tier: "gold",
+    license_type: "lifetime",
+    appGeneration: "v1",
+  },
 };
 
 // ── نگاشت productId گوگل پلی → سطح و مدت لایسنس ────────────────────────
@@ -723,7 +796,11 @@ const MYKET_SKU_LICENSE_MAP = {
 // Console → Monetize → Products → In-app products ساختی. عمداً سمت سرور
 // نگه داشته می‌شه، نه چیزی که از body درخواست خونده بشه.
 const GOOGLE_PLAY_SKU_LICENSE_MAP = {
-  buskit_lifetime: { tier: "gold", license_type: "lifetime", appGeneration: "v1" },
+  buskit_lifetime: {
+    tier: "gold",
+    license_type: "lifetime",
+    appGeneration: "v1",
+  },
 };
 
 // ── نگاشت productId کافه‌بازار → سطح و مدت لایسنس ──────────────────────
@@ -732,7 +809,11 @@ const GOOGLE_PLAY_SKU_LICENSE_MAP = {
 // محصولی باشه که توی پیشخوان بازار (Cafe Bazaar Developer Console) ساختی.
 // عمداً سمت سرور نگه داشته می‌شه، نه چیزی که از body درخواست خونده بشه.
 const BAZAAR_SKU_LICENSE_MAP = {
-  buskit_lifetime: { tier: "gold", license_type: "lifetime", appGeneration: "v1" },
+  buskit_lifetime: {
+    tier: "gold",
+    license_type: "lifetime",
+    appGeneration: "v1",
+  },
 };
 
 // ── کد سیستمیِ «بدون کد تخفیف» ────────────────────────────────────────────
@@ -749,7 +830,8 @@ const LICENSE_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 function generateLicenseCode() {
   let code = "";
   for (let i = 0; i < 10; i++) {
-    code += LICENSE_CODE_ALPHABET[crypto.randomInt(LICENSE_CODE_ALPHABET.length)];
+    code +=
+      LICENSE_CODE_ALPHABET[crypto.randomInt(LICENSE_CODE_ALPHABET.length)];
   }
   return code;
 }
@@ -850,32 +932,33 @@ const PAYMENT_ACCOUNTS = {
 };
 
 function buildAccountsBlock(lang) {
-  const t = {
-    fa: {
-      heading: "حساب‌های بانکی جهت واریز وجه:",
-      iran: "کارت بانکی ایران (بانک ملت):",
-      owner: "به نام:",
-      tr: "حساب لیر ترکیه (Ziraat Bank):",
-    },
-    en: {
-      heading: "Bank accounts for payment:",
-      iran: "Iranian bank card (Bank Mellat):",
-      owner: "Account holder:",
-      tr: "Turkish Lira account (Ziraat Bank):",
-    },
-    tr: {
-      heading: "Ödeme için banka hesapları:",
-      iran: "İran banka kartı (Bank Mellat):",
-      owner: "Hesap sahibi:",
-      tr: "Türk Lirası hesabı (Ziraat Bank):",
-    },
-    de: {
-      heading: "Bankkonten für die Zahlung:",
-      iran: "Iranische Bankkarte (Bank Mellat):",
-      owner: "Kontoinhaber:",
-      tr: "Türkische-Lira-Konto (Ziraat Bank):",
-    },
-  }[lang] || null;
+  const t =
+    {
+      fa: {
+        heading: "حساب‌های بانکی جهت واریز وجه:",
+        iran: "کارت بانکی ایران (بانک ملت):",
+        owner: "به نام:",
+        tr: "حساب لیر ترکیه (Ziraat Bank):",
+      },
+      en: {
+        heading: "Bank accounts for payment:",
+        iran: "Iranian bank card (Bank Mellat):",
+        owner: "Account holder:",
+        tr: "Turkish Lira account (Ziraat Bank):",
+      },
+      tr: {
+        heading: "Ödeme için banka hesapları:",
+        iran: "İran banka kartı (Bank Mellat):",
+        owner: "Hesap sahibi:",
+        tr: "Türk Lirası hesabı (Ziraat Bank):",
+      },
+      de: {
+        heading: "Bankkonten für die Zahlung:",
+        iran: "Iranische Bankkarte (Bank Mellat):",
+        owner: "Kontoinhaber:",
+        tr: "Türkische-Lira-Konto (Ziraat Bank):",
+      },
+    }[lang] || null;
   const L = t || {
     heading: "Bank accounts for payment:",
     iran: "Iranian bank card (Bank Mellat):",
@@ -981,7 +1064,10 @@ async function sendProbationLicenseEmail(email, name, licenseCode, lang) {
     email: process.env.BREVO_SENDER_EMAIL || PAYMENT_ACCOUNTS.contactEmail,
   };
   // پاسخ مشتری (ارسال سند واریزی) همیشه به آدرس اصلی برگردد
-  sendSmtpEmail.replyTo = { email: PAYMENT_ACCOUNTS.contactEmail, name: "Buskit" };
+  sendSmtpEmail.replyTo = {
+    email: PAYMENT_ACCOUNTS.contactEmail,
+    name: "Buskit",
+  };
   sendSmtpEmail.to = [{ email, name: name || undefined }];
   sendSmtpEmail.subject = subject;
   sendSmtpEmail.htmlContent = html;
@@ -1032,9 +1118,7 @@ app.post("/request-probation-license", async (req, res) => {
       typeof appId === "string" && appId.trim() ? appId.trim() : null;
 
     if (!cleanName || !cleanEmail || !/^\S+@\S+\.\S+$/.test(cleanEmail)) {
-      return res
-        .status(400)
-        .json({ success: false, error: "invalid-input" });
+      return res.status(400).json({ success: false, error: "invalid-input" });
     }
 
     // اگه appId فرستاده شده (فعلاً فقط اپ اندروید این کار رو می‌کنه)، باید
@@ -1071,9 +1155,7 @@ app.post("/request-probation-license", async (req, res) => {
       .limit(1)
       .get();
     if (!dup.empty) {
-      return res
-        .status(409)
-        .json({ success: false, error: "already-issued" });
+      return res.status(409).json({ success: false, error: "already-issued" });
     }
 
     const licenseCode = generateLicenseCode();
@@ -1112,13 +1194,10 @@ app.post("/request-probation-license", async (req, res) => {
         licenseCode,
         safeLang,
       );
-      await db
-        .collection("licenses")
-        .doc(licenseCode)
-        .update({
-          delivered: true,
-          deliveredAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
+      await db.collection("licenses").doc(licenseCode).update({
+        delivered: true,
+        deliveredAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
     } catch (mailErr) {
       emailSent = false;
       console.error("خطا در ارسال ایمیل لایسنس probation:", mailErr);
@@ -1145,9 +1224,7 @@ app.post("/request-probation-license", async (req, res) => {
     // ── اپ اندروید: کد را همیشه در پاسخ برمی‌گردانیم (چه ایمیل رفته باشد
     // چه نه)، چون در اپ خودِ دیالوگ کانال اصلی تحویل کد است.
     if (isAppRequest) {
-      return res
-        .status(200)
-        .json({ success: true, licenseCode, emailSent });
+      return res.status(200).json({ success: true, licenseCode, emailSent });
     }
 
     // ── سایت: رفتار قبلی دست‌نخورده — اگر ایمیل نرفت، به کاربر می‌گوییم که
@@ -1255,13 +1332,19 @@ app.post("/create-order", async (req, res) => {
     // آیتم‌هایی که واقعاً قرار است کد تخفیفِ وارد شده رویشان اعمال شود، در
     // برابر بقیه‌ی آیتم‌ها که (بدون کد یا با discountApplied:false) زیر کد
     // سیستمیِ «فروش مستقیم» جمع می‌شوند
-    const discountedCount = licenseItems.filter((it) => it.discountApplied).length;
+    const discountedCount = licenseItems.filter(
+      (it) => it.discountApplied,
+    ).length;
     const directCount = licenseItems.length - discountedCount;
 
     const codeRef =
-      code && discountedCount > 0 ? db.collection("discountCodes").doc(code) : null;
+      code && discountedCount > 0
+        ? db.collection("discountCodes").doc(code)
+        : null;
     const directRef =
-      directCount > 0 ? db.collection("discountCodes").doc(NO_DISCOUNT_CODE) : null;
+      directCount > 0
+        ? db.collection("discountCodes").doc(NO_DISCOUNT_CODE)
+        : null;
     const orderRef = db.collection("orders").doc();
     const licenseRefs = licenseItems.map(() =>
       db.collection("licenses").doc(generateLicenseCode()),
@@ -1364,8 +1447,6 @@ app.post("/create-order", async (req, res) => {
   }
 });
 
-
-
 // ════════════════════════════════════════════════════════════════════════
 //  وبهوک Lemon Squeezy → ساخت خودکار لایسنس + ایمیل به خریدار
 // ════════════════════════════════════════════════════════════════════════
@@ -1394,7 +1475,10 @@ app.post(
         return res.status(401).json({ error: "missing signature" });
       }
 
-      const hmac = crypto.createHmac("sha256", process.env.LEMON_WEBHOOK_SECRET);
+      const hmac = crypto.createHmac(
+        "sha256",
+        process.env.LEMON_WEBHOOK_SECRET,
+      );
       const digest = Buffer.from(hmac.update(req.body).digest("hex"), "utf8");
       const received = Buffer.from(signature, "utf8");
 
@@ -1451,7 +1535,10 @@ app.post(
         const existing = await tx.get(orderRef);
         if (existing.exists) {
           // این orderId قبلاً پردازش شده (وبهوک تکراری) — چیزی نساز
-          return { alreadyProcessed: true, licenseCode: existing.data().licenseCode };
+          return {
+            alreadyProcessed: true,
+            licenseCode: existing.data().licenseCode,
+          };
         }
 
         tx.set(db.collection("licenses").doc(licenseCode), {
@@ -1550,7 +1637,9 @@ app.post("/myket/verify-purchase", async (req, res) => {
 
     if (!MYKET_ACCESS_TOKEN) {
       console.error("مایکت: متغیر محیطی MYKET_ACCESS_TOKEN تنظیم نشده");
-      return res.status(500).json({ success: false, error: "Server misconfigured" });
+      return res
+        .status(500)
+        .json({ success: false, error: "Server misconfigured" });
     }
 
     // ── idempotency: این purchaseToken قبلاً پردازش شده؟ ─────────────
@@ -1605,12 +1694,16 @@ app.post("/myket/verify-purchase", async (req, res) => {
       }
     } catch (err) {
       console.error("مایکت: خطا در اتصال به verify API:", err);
-      return res.status(502).json({ success: false, error: "Could not reach Myket" });
+      return res
+        .status(502)
+        .json({ success: false, error: "Could not reach Myket" });
     }
 
     // طبق مستندات مایکت: purchaseState === 0 یعنی خرید موفق
     if (myketData.purchaseState !== 0) {
-      return res.status(403).json({ success: false, error: "Purchase not successful" });
+      return res
+        .status(403)
+        .json({ success: false, error: "Purchase not successful" });
     }
 
     // ── ساخت لایسنس + ثبت idempotency، هر دو در یک تراکنش ─────────────
@@ -1647,9 +1740,22 @@ app.post("/myket/verify-purchase", async (req, res) => {
       });
     });
 
-    await linkDevice(fingerprint, appId, licenseType, licenseCode, appGeneration);
+    await linkDevice(
+      fingerprint,
+      appId,
+      licenseType,
+      licenseCode,
+      appGeneration,
+    );
 
-    const token = createSignedToken(fingerprint, appId, licenseCode, licenseType, null, tier);
+    const token = createSignedToken(
+      fingerprint,
+      appId,
+      licenseCode,
+      licenseType,
+      null,
+      tier,
+    );
 
     return res.status(200).json({
       success: true,
@@ -1764,12 +1870,16 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
       }
     } catch (err) {
       console.error("گوگل پلی: خطا در اتصال به verify API:", err);
-      return res.status(502).json({ success: false, error: "Could not reach Google Play" });
+      return res
+        .status(502)
+        .json({ success: false, error: "Could not reach Google Play" });
     }
 
     // طبق مستندات گوگل: purchaseState === 0 یعنی خرید موفق (1 = لغوشده، 2 = در انتظار)
     if (purchaseData.purchaseState !== 0) {
-      return res.status(403).json({ success: false, error: "Purchase not successful" });
+      return res
+        .status(403)
+        .json({ success: false, error: "Purchase not successful" });
     }
 
     // ── acknowledge خرید سمت سرور، اگه کلاینت هنوز این کار رو نکرده ────
@@ -1832,9 +1942,22 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
       });
     });
 
-    await linkDevice(fingerprint, appId, licenseType, licenseCode, appGeneration);
+    await linkDevice(
+      fingerprint,
+      appId,
+      licenseType,
+      licenseCode,
+      appGeneration,
+    );
 
-    const token = createSignedToken(fingerprint, appId, licenseCode, licenseType, null, tier);
+    const token = createSignedToken(
+      fingerprint,
+      appId,
+      licenseCode,
+      licenseType,
+      null,
+      tier,
+    );
 
     return res.status(200).json({
       success: true,
@@ -1940,17 +2063,22 @@ app.post("/bazaar/verify-purchase", async (req, res) => {
         console.error("بازار: خطای verify API:", bazaarData);
         return res.status(502).json({
           success: false,
-          error: bazaarData?.error_description || "Purchase verification failed",
+          error:
+            bazaarData?.error_description || "Purchase verification failed",
         });
       }
     } catch (err) {
       console.error("بازار: خطا در اتصال به verify API:", err);
-      return res.status(502).json({ success: false, error: "Could not reach Bazaar" });
+      return res
+        .status(502)
+        .json({ success: false, error: "Could not reach Bazaar" });
     }
 
     // طبق مستندات بازار: purchaseState === 0 یعنی خرید موفق
     if (bazaarData.purchaseState !== 0) {
-      return res.status(403).json({ success: false, error: "Purchase not successful" });
+      return res
+        .status(403)
+        .json({ success: false, error: "Purchase not successful" });
     }
 
     // ── ساخت لایسنس + ثبت idempotency، هر دو در یک تراکنش ─────────────
@@ -1987,9 +2115,22 @@ app.post("/bazaar/verify-purchase", async (req, res) => {
       });
     });
 
-    await linkDevice(fingerprint, appId, licenseType, licenseCode, appGeneration);
+    await linkDevice(
+      fingerprint,
+      appId,
+      licenseType,
+      licenseCode,
+      appGeneration,
+    );
 
-    const token = createSignedToken(fingerprint, appId, licenseCode, licenseType, null, tier);
+    const token = createSignedToken(
+      fingerprint,
+      appId,
+      licenseCode,
+      licenseType,
+      null,
+      tier,
+    );
 
     return res.status(200).json({
       success: true,
@@ -2058,7 +2199,9 @@ app.post("/activate", async (req, res) => {
       const userRef = licenseRef.collection("users").doc(safeId);
       const userDoc = await userRef.get();
 
-      console.log(`[activate] trial ${licenseCode} device=${safeId.slice(0, 8)} record_exists=${userDoc.exists}`);
+      console.log(
+        `[activate] trial ${licenseCode} device=${safeId.slice(0, 8)} record_exists=${userDoc.exists}`,
+      );
       if (userDoc.exists) {
         const userData = userDoc.data();
         const expiresAt = userData.expires_at
@@ -2074,7 +2217,13 @@ app.post("/activate", async (req, res) => {
             expiresAt,
             tier,
           );
-          await linkDevice(fingerprint, appId, licenseType, licenseCode, appGeneration);
+          await linkDevice(
+            fingerprint,
+            appId,
+            licenseType,
+            licenseCode,
+            appGeneration,
+          );
           return res.status(200).json({
             success: true,
             token,
@@ -2092,7 +2241,9 @@ app.post("/activate", async (req, res) => {
       }
 
       // اولین بار این ترکیب «دستگاه + اپ» میاد سراغ trial → ثبت کن
-      console.log(`[activate] NEW trial record created for device=${safeId.slice(0, 8)}`);
+      console.log(
+        `[activate] NEW trial record created for device=${safeId.slice(0, 8)}`,
+      );
       const now = Date.now();
       const expiresAt = durationMs !== null ? now + durationMs : null;
       const expiresAtFirestore =
@@ -2120,10 +2271,23 @@ app.post("/activate", async (req, res) => {
         expiresAt,
         tier,
       );
-      await linkDevice(fingerprint, appId, licenseType, licenseCode, appGeneration);
+      await linkDevice(
+        fingerprint,
+        appId,
+        licenseType,
+        licenseCode,
+        appGeneration,
+      );
       return res
         .status(200)
-        .json({ success: true, token, licenseType, tier, licenseCode, expiresAt });
+        .json({
+          success: true,
+          token,
+          licenseType,
+          tier,
+          licenseCode,
+          expiresAt,
+        });
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -2155,12 +2319,17 @@ app.post("/activate", async (req, res) => {
 
         if (freshData.is_used) {
           // حالا هم fingerprint هم appId باید مچ باشن
-          if (freshData.fingerprint === fingerprint && freshData.appId === appId) {
+          if (
+            freshData.fingerprint === fingerprint &&
+            freshData.appId === appId
+          ) {
             const expiresAt = freshData.expires_at
               ? freshData.expires_at.toMillis()
               : null;
             if (expiresAt !== null && Date.now() > expiresAt) {
-              throw Object.assign(new Error("expired"), { isActivateErr: true });
+              throw Object.assign(new Error("expired"), {
+                isActivateErr: true,
+              });
             }
             return { expiresAt };
           }
@@ -2236,7 +2405,13 @@ app.post("/activate", async (req, res) => {
       txResult.expiresAt,
       tier,
     );
-    await linkDevice(fingerprint, appId, licenseType, licenseCode, appGeneration);
+    await linkDevice(
+      fingerprint,
+      appId,
+      licenseType,
+      licenseCode,
+      appGeneration,
+    );
     return res.status(200).json({
       success: true,
       token,
@@ -2281,7 +2456,11 @@ app.post("/signin", async (req, res) => {
 
     // ── اعلام ورژن/آپدیت: مستقل از وضعیت لایسنس، همراه هر پاسخ برمی‌گرده ──
     const versionDoc = await getVersionDoc(appId);
-    const versionInfo = buildVersionInfo(versionDoc, currentVersion, currentUpdate);
+    const versionInfo = buildVersionInfo(
+      versionDoc,
+      currentVersion,
+      currentUpdate,
+    );
 
     const safeId = deviceAppId(fingerprint, appId);
     const deviceRef = db.collection("devices").doc(safeId);
@@ -2480,7 +2659,9 @@ app.post("/logout", async (req, res) => {
       }
       // هیچ حذفی روی userRef انجام نمی‌شه؛ فقط پاک‌سازی لینک دستگاه
       // (links.5days) پایین‌تر انجام می‌شه.
-      console.log(`[logout] trial record KEPT for device=${safeId.slice(0, 8)}`);
+      console.log(
+        `[logout] trial record KEPT for device=${safeId.slice(0, 8)}`,
+      );
     } else {
       // ════════════════════════════════════════════════════════════
       // حالت ۲: لایسنس اختصاصی — دقیقاً هم‌ساختار با تراکنش /activate
@@ -2548,14 +2729,20 @@ app.post("/logout", async (req, res) => {
 async function requireAdmin(req, res, next) {
   try {
     const authHeader = req.headers.authorization || "";
-    const idToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    const idToken = authHeader.startsWith("Bearer ")
+      ? authHeader.slice(7)
+      : null;
     if (!idToken) {
-      return res.status(401).json({ status: "error", error: "توکن ورود ارسال نشده" });
+      return res
+        .status(401)
+        .json({ status: "error", error: "توکن ورود ارسال نشده" });
     }
     await admin.auth().verifyIdToken(idToken);
     next();
   } catch (err) {
-    return res.status(401).json({ status: "error", error: "دسترسی نامعتبر یا خطای سرور" });
+    return res
+      .status(401)
+      .json({ status: "error", error: "دسترسی نامعتبر یا خطای سرور" });
   }
 }
 
@@ -2578,41 +2765,55 @@ app.post("/admin/announce-version", requireAdmin, async (req, res) => {
       return res.status(400).json({ status: "error", error: "Unknown appId" });
     }
     if (!version || !Number.isFinite(Number(version)) || Number(version) <= 0) {
-      return res.status(400).json({ status: "error", error: "Invalid version number" });
+      return res
+        .status(400)
+        .json({ status: "error", error: "Invalid version number" });
     }
     if (versionType !== "free" && versionType !== "paid") {
       return res
         .status(400)
-        .json({ status: "error", error: "versionType must be 'free' or 'paid'" });
+        .json({
+          status: "error",
+          error: "versionType must be 'free' or 'paid'",
+        });
     }
     if (versionType === "free" && !versionDownloadUrl) {
       return res
         .status(400)
-        .json({ status: "error", error: "versionDownloadUrl is required for a free version" });
+        .json({
+          status: "error",
+          error: "versionDownloadUrl is required for a free version",
+        });
     }
     if (versionType === "paid" && !versionPurchaseUrl) {
       return res
         .status(400)
-        .json({ status: "error", error: "versionPurchaseUrl is required for a paid version" });
+        .json({
+          status: "error",
+          error: "versionPurchaseUrl is required for a paid version",
+        });
     }
 
-    await db.collection("appVersions").doc(appId).set(
-      {
-        version: Number(version),
-        versionType,
-        versionDownloadUrl: versionDownloadUrl || null,
-        versionPurchaseUrl: versionPurchaseUrl || null,
-        versionNotes: versionNotes || "",
-        // اعلام ورژن جدید یعنی آپدیت‌های ورژن قبلی دیگه بی‌معنی‌ان
-        update: 0,
-        updateType: "free",
-        updateDownloadUrl: null,
-        updatePurchaseUrl: null,
-        updateNotes: "",
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true },
-    );
+    await db
+      .collection("appVersions")
+      .doc(appId)
+      .set(
+        {
+          version: Number(version),
+          versionType,
+          versionDownloadUrl: versionDownloadUrl || null,
+          versionPurchaseUrl: versionPurchaseUrl || null,
+          versionNotes: versionNotes || "",
+          // اعلام ورژن جدید یعنی آپدیت‌های ورژن قبلی دیگه بی‌معنی‌ان
+          update: 0,
+          updateType: "free",
+          updateDownloadUrl: null,
+          updatePurchaseUrl: null,
+          updateNotes: "",
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
 
     return res.status(200).json({ status: "ok" });
   } catch (err) {
@@ -2640,22 +2841,33 @@ app.post("/admin/announce-update", requireAdmin, async (req, res) => {
       return res.status(400).json({ status: "error", error: "Unknown appId" });
     }
     if (!update || !Number.isFinite(Number(update)) || Number(update) <= 0) {
-      return res.status(400).json({ status: "error", error: "Invalid update number" });
+      return res
+        .status(400)
+        .json({ status: "error", error: "Invalid update number" });
     }
     if (updateType !== "free" && updateType !== "paid") {
       return res
         .status(400)
-        .json({ status: "error", error: "updateType must be 'free' or 'paid'" });
+        .json({
+          status: "error",
+          error: "updateType must be 'free' or 'paid'",
+        });
     }
     if (updateType === "free" && !updateDownloadUrl) {
       return res
         .status(400)
-        .json({ status: "error", error: "updateDownloadUrl is required for a free update" });
+        .json({
+          status: "error",
+          error: "updateDownloadUrl is required for a free update",
+        });
     }
     if (updateType === "paid" && !updatePurchaseUrl) {
       return res
         .status(400)
-        .json({ status: "error", error: "updatePurchaseUrl is required for a paid update" });
+        .json({
+          status: "error",
+          error: "updatePurchaseUrl is required for a paid update",
+        });
     }
 
     const ref = db.collection("appVersions").doc(appId);
@@ -2663,7 +2875,8 @@ app.post("/admin/announce-update", requireAdmin, async (req, res) => {
     if (!existing.exists) {
       return res.status(400).json({
         status: "error",
-        error: "No version announced yet for this appId — call /admin/announce-version first.",
+        error:
+          "No version announced yet for this appId — call /admin/announce-version first.",
       });
     }
 
@@ -2710,7 +2923,9 @@ app.post("/admin/mark-paid", requireAdmin, async (req, res) => {
   try {
     const rawLicenseCode = req.body?.licenseCode;
     if (!rawLicenseCode || typeof rawLicenseCode !== "string") {
-      return res.status(400).json({ status: "error", error: "licenseCode الزامی است" });
+      return res
+        .status(400)
+        .json({ status: "error", error: "licenseCode الزامی است" });
     }
     const licenseCode = rawLicenseCode.trim().toUpperCase();
     const licenseRef = db.collection("licenses").doc(licenseCode);
@@ -2718,7 +2933,10 @@ app.post("/admin/mark-paid", requireAdmin, async (req, res) => {
     const result = await db.runTransaction(async (tx) => {
       const licenseDoc = await tx.get(licenseRef);
       if (!licenseDoc.exists) {
-        throw Object.assign(new Error("not-found"), { httpStatus: 404, msg: "کد لایسنس پیدا نشد" });
+        throw Object.assign(new Error("not-found"), {
+          httpStatus: 404,
+          msg: "کد لایسنس پیدا نشد",
+        });
       }
 
       const data = licenseDoc.data();
@@ -2733,7 +2951,9 @@ app.post("/admin/mark-paid", requireAdmin, async (req, res) => {
       const oldType = data.license_type ?? "lifetime";
       const wasActivated = !!(data.is_used && data.fingerprint && data.appId);
       const deviceRef = wasActivated
-        ? db.collection("devices").doc(deviceAppId(data.fingerprint, data.appId))
+        ? db
+            .collection("devices")
+            .doc(deviceAppId(data.fingerprint, data.appId))
         : null;
 
       // ── ثبت پرداخت + ارتقا روی سند لایسنس ───────────────────────────
@@ -2742,7 +2962,10 @@ app.post("/admin/mark-paid", requireAdmin, async (req, res) => {
         paidAt: admin.firestore.FieldValue.serverTimestamp(),
         license_type: "lifetime",
         expires_at: null,
-        upgradedFrom: oldType === "lifetime" ? admin.firestore.FieldValue.delete() : oldType,
+        upgradedFrom:
+          oldType === "lifetime"
+            ? admin.firestore.FieldValue.delete()
+            : oldType,
         upgradedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
@@ -2778,7 +3001,10 @@ app.post("/admin/mark-paid", requireAdmin, async (req, res) => {
         });
       }
     } catch (reqErr) {
-      console.error("خطا در بروزرسانی licenseRequests بعد از mark-paid:", reqErr);
+      console.error(
+        "خطا در بروزرسانی licenseRequests بعد از mark-paid:",
+        reqErr,
+      );
     }
 
     return res.status(200).json({
@@ -2790,7 +3016,9 @@ app.post("/admin/mark-paid", requireAdmin, async (req, res) => {
     });
   } catch (err) {
     if (err.httpStatus) {
-      return res.status(err.httpStatus).json({ status: "error", error: err.msg });
+      return res
+        .status(err.httpStatus)
+        .json({ status: "error", error: err.msg });
     }
     console.error("خطا در mark-paid:", err);
     return res.status(500).json({ status: "error", error: "Server error" });
@@ -2887,7 +3115,9 @@ app.delete("/admin/discount/:code", async (req, res) => {
 
     const { code } = req.params;
     if (!code) {
-      return res.status(400).json({ status: "error", error: "کد تخفیف نامعتبر" });
+      return res
+        .status(400)
+        .json({ status: "error", error: "کد تخفیف نامعتبر" });
     }
 
     await db.collection("discountCodes").doc(code).delete();
@@ -2922,7 +3152,12 @@ app.get("/rates/latest", (req, res) => {
 app.post("/admin/refresh-rates", requireAdmin, async (req, res) => {
   const [usdTry, usdIrr] = await Promise.all([
     runRateJob("usdTry", USD_TRY_SOURCES, applyUsdTryResult, "نرخ دلار/لیر"),
-    runRateJob("usdIrr", USD_IRR_SOURCES, applyUsdIrrResult, "نرخ دلار/ریال بازار آزاد"),
+    runRateJob(
+      "usdIrr",
+      USD_IRR_SOURCES,
+      applyUsdIrrResult,
+      "نرخ دلار/ریال بازار آزاد",
+    ),
   ]);
 
   const allFailed = !usdTry.success && !usdIrr.success;
