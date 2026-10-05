@@ -1592,6 +1592,194 @@ app.post(
 );
 
 // ════════════════════════════════════════════════════════════════════════
+//  کمک‌کننده‌های خرید مایکت: idempotency، انتقال لایسنس، چک استرداد وجه
+// ════════════════════════════════════════════════════════════════════════
+
+// ── یک purchaseToken که قبلاً پردازش شده، دوباره به یک دستگاه گره می‌خوره ──
+// همه‌چیز داخل یک تراکنش (جلوی race بین دو درخواست هم‌زمان رو هم می‌گیره).
+//   • همان دستگاه (مثلاً retry بعد از timeout) → همان لایسنس، توکن تازه.
+//   • لایسنس آزاد شده (بعد از «انتقال لایسنس»/Log out) → به دستگاه
+//     درخواست‌دهنده گره می‌خوره، چون خرید مایکت به اکانت وصله نه دستگاه.
+//   • لایسنس هنوز روی دستگاه دیگه فعاله → conflict (یک خرید = یک دستگاه).
+//   • لایسنس استردادشده (revoked) → رد می‌شه.
+// خروجی: { status: "missing" | "conflict" | "revoked" | "ok", ... }
+async function bindExistingMyketPurchase({
+  purchaseToken,
+  fingerprint,
+  appId,
+  hardwareSignature,
+  appGeneration,
+}) {
+  const purchaseRef = db.collection("myketPurchases").doc(purchaseToken);
+
+  const outcome = await db.runTransaction(async (tx) => {
+    const purchaseSnap = await tx.get(purchaseRef);
+    if (!purchaseSnap.exists) return { status: "missing" };
+    const prev = purchaseSnap.data();
+    if (prev.appId !== appId) return { status: "conflict" };
+
+    const licenseRef = db.collection("licenses").doc(prev.licenseCode);
+    const licenseSnap = await tx.get(licenseRef);
+    const binding = {
+      is_used: true,
+      fingerprint,
+      appId,
+      hardwareSignature: hardwareSignature || null,
+      activated_at: admin.firestore.FieldValue.serverTimestamp(),
+      expires_at: null,
+    };
+
+    if (!licenseSnap.exists) {
+      // سند لایسنس به هر دلیلی نیست → با همان کد دوباره می‌سازیمش
+      tx.set(licenseRef, {
+        tier: prev.tier,
+        license_type: prev.licenseType,
+        appGeneration: appGeneration || CURRENT_APP_GENERATION,
+        is_shared: false,
+        ...binding,
+        source: "myket",
+        myket_sku_id: prev.skuId,
+        myket_purchase_token: purchaseToken,
+        myket_verified_at: admin.firestore.FieldValue.serverTimestamp(),
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    } else {
+      const lic = licenseSnap.data();
+      if (lic.revoked === true) return { status: "revoked" };
+      if (lic.is_used) {
+        if (lic.fingerprint !== fingerprint || lic.appId !== appId) {
+          return { status: "conflict" };
+        }
+        // همان دستگاه → چیزی برای تغییر نیست
+      } else {
+        tx.update(licenseRef, binding);
+      }
+    }
+
+    if (prev.fingerprint !== fingerprint) {
+      tx.update(purchaseRef, {
+        fingerprint,
+        reboundAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+    return { status: "ok", prev };
+  });
+
+  if (outcome.status !== "ok") return outcome;
+
+  // set+merge است و idempotent؛ اگه دفعه‌ی قبل بین تراکنش و linkDevice
+  // سرور قطع شده باشه، این‌جا ایندکس دستگاه هم ترمیم می‌شه.
+  const { prev } = outcome;
+  await linkDevice(
+    fingerprint,
+    appId,
+    prev.licenseType,
+    prev.licenseCode,
+    appGeneration,
+  );
+  const token = createSignedToken(
+    fingerprint,
+    appId,
+    prev.licenseCode,
+    prev.licenseType,
+    null,
+    prev.tier,
+  );
+  return {
+    status: "ok",
+    token,
+    licenseType: prev.licenseType,
+    tier: prev.tier,
+    licenseCode: prev.licenseCode,
+  };
+}
+
+// پاسخ HTTP مشترک برای خروجی bindExistingMyketPurchase (به‌جز "missing")
+function sendMyketBindResult(res, r) {
+  if (r.status === "conflict") {
+    return res.status(409).json({
+      success: false,
+      code: "LICENSE_IN_USE_ELSEWHERE",
+      error:
+        "این خرید مایکت هم‌اکنون روی دستگاه دیگری فعال است. ابتدا از همان دستگاه «انتقال لایسنس» (Log out) را بزنید و دوباره تلاش کنید.",
+    });
+  }
+  if (r.status === "revoked") {
+    return res.status(403).json({
+      success: false,
+      code: "PURCHASE_REVOKED",
+      error: "این خرید مسترد شده و لایسنس آن دیگر معتبر نیست.",
+    });
+  }
+  return res.status(200).json({
+    success: true,
+    token: r.token,
+    licenseType: r.licenseType,
+    tier: r.tier,
+    licenseCode: r.licenseCode,
+    expiresAt: null,
+  });
+}
+
+// ── چک دوره‌ای استرداد وجه (غیرفعال به‌صورت پیش‌فرض) ──────────────────────
+// با env MYKET_REVALIDATE_HOURS (مثلاً 24) فعال می‌شه. در /signin، برای
+// لایسنس‌های مایکت که بیش از این مدت از آخرین تایید گذشته، دوباره از API
+// مایکت پرسیده می‌شه. Fail-open: هر خطای شبکه/API یعنی «معتبر» (کاربر
+// پولی قفل نشه). فقط وقتی مایکت صریحاً purchaseState غیر از 0 بده، لایسنس
+// revoked می‌شه.
+const MYKET_REVALIDATE_MS =
+  (Number(process.env.MYKET_REVALIDATE_HOURS) || 0) * 60 * 60 * 1000;
+
+async function isMyketPurchaseRevoked(licenseRef, data) {
+  if (data.revoked === true) return true;
+  if (!MYKET_REVALIDATE_MS || !MYKET_ACCESS_TOKEN) return false;
+  if (!data.myket_purchase_token || !data.myket_sku_id || !data.appId)
+    return false;
+
+  const lastMs = data.myket_verified_at
+    ? data.myket_verified_at.toMillis()
+    : data.activated_at
+      ? data.activated_at.toMillis()
+      : 0;
+  if (Date.now() - lastMs < MYKET_REVALIDATE_MS) return false;
+
+  try {
+    const verifyUrl = `https://developer.myket.ir/api/partners/applications/${encodeURIComponent(
+      data.appId,
+    )}/purchases/products/${encodeURIComponent(data.myket_sku_id)}/verify`;
+    const r = await fetch(verifyUrl, {
+      method: "POST",
+      headers: {
+        "X-Access-Token": MYKET_ACCESS_TOKEN,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ tokenId: data.myket_purchase_token }),
+      signal: AbortSignal.timeout(5000),
+    });
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j) return false; // fail-open
+
+    if (typeof j.purchaseState === "number" && j.purchaseState !== 0) {
+      await licenseRef.update({
+        revoked: true,
+        revokedAt: admin.firestore.FieldValue.serverTimestamp(),
+        revokeReason: `myket purchaseState=${j.purchaseState}`,
+      });
+      return true;
+    }
+    await licenseRef
+      .update({
+        myket_verified_at: admin.firestore.FieldValue.serverTimestamp(),
+      })
+      .catch(() => {});
+    return false;
+  } catch (err) {
+    console.error("مایکت: خطا در بازبینی دوره‌ای خرید:", err);
+    return false; // fail-open
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
 //  تایید خرید مایکت → ساخت خودکار و فعال‌سازی فوری لایسنس
 // ════════════════════════════════════════════════════════════════════════
 // برخلاف Lemon Squeezy، مایکت وبهوک نمی‌فرسته. به‌جاش، بعد از این‌که کاربر
@@ -1642,28 +1830,18 @@ app.post("/myket/verify-purchase", async (req, res) => {
         .json({ success: false, error: "Server misconfigured" });
     }
 
-    // ── idempotency: این purchaseToken قبلاً پردازش شده؟ ─────────────
-    // (چه به‌خاطر retry شبکه‌ای کلاینت، چه سوءاستفاده‌ی عمدی از یک توکن قدیمی)
+    // ── idempotency + انتقال لایسنس: این purchaseToken قبلاً پردازش شده؟ ──
+    // (retry بعد از timeout، یا بازیابی روی دستگاه جدید بعد از Log out)
     const purchaseRef = db.collection("myketPurchases").doc(purchaseToken);
-    const existingPurchase = await purchaseRef.get();
-    if (existingPurchase.exists) {
-      const prev = existingPurchase.data();
-      const token = createSignedToken(
-        prev.fingerprint,
-        prev.appId,
-        prev.licenseCode,
-        prev.licenseType,
-        null,
-        prev.tier,
-      );
-      return res.status(200).json({
-        success: true,
-        token,
-        licenseType: prev.licenseType,
-        tier: prev.tier,
-        licenseCode: prev.licenseCode,
-        expiresAt: null,
-      });
+    const existing = await bindExistingMyketPurchase({
+      purchaseToken,
+      fingerprint,
+      appId,
+      hardwareSignature,
+      appGeneration,
+    });
+    if (existing.status !== "missing") {
+      return sendMyketBindResult(res, existing);
     }
 
     // ── صحت‌سنجی خرید با سرور مایکت (server-to-server) ───────────────
@@ -1711,7 +1889,16 @@ app.post("/myket/verify-purchase", async (req, res) => {
     const tier = info.tier;
     const licenseType = info.license_type;
 
+    let lostRace = false;
     await db.runTransaction(async (tx) => {
+      lostRace = false;
+      // درخواست هم‌زمان دیگه‌ای (مثلاً retry کلاینت) ممکنه همین توکن رو
+      // همین الان ثبت کرده باشه؛ داخل تراکنش دوباره چک می‌کنیم.
+      const again = await tx.get(purchaseRef);
+      if (again.exists) {
+        lostRace = true;
+        return;
+      }
       tx.set(db.collection("licenses").doc(licenseCode), {
         tier,
         license_type: licenseType,
@@ -1724,6 +1911,7 @@ app.post("/myket/verify-purchase", async (req, res) => {
         source: "myket",
         myket_sku_id: skuId,
         myket_purchase_token: purchaseToken,
+        myket_verified_at: admin.firestore.FieldValue.serverTimestamp(),
         activated_at: admin.firestore.FieldValue.serverTimestamp(),
         expires_at: null, // فقط lifetime می‌فروشیم
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -1739,6 +1927,17 @@ app.post("/myket/verify-purchase", async (req, res) => {
         processedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
     });
+
+    if (lostRace) {
+      const raced = await bindExistingMyketPurchase({
+        purchaseToken,
+        fingerprint,
+        appId,
+        hardwareSignature,
+        appGeneration,
+      });
+      return sendMyketBindResult(res, raced);
+    }
 
     await linkDevice(
       fingerprint,
@@ -1770,6 +1969,204 @@ app.post("/myket/verify-purchase", async (req, res) => {
     return res.status(500).json({ success: false, error: "Server error" });
   }
 });
+
+// ════════════════════════════════════════════════════════════════════════
+//  کمک‌کننده‌ی مشترک خرید فروشگاه‌ها (گوگل پلی / بازار): idempotency + انتقال لایسنس
+// ════════════════════════════════════════════════════════════════════════
+// همان منطق bindExistingMyketPurchase، برای هر کالکشن خرید. همه‌چیز داخل یک تراکنش:
+//   • همان دستگاه (retry بعد از timeout) → همان لایسنس، توکن تازه برای «این» دستگاه.
+//   • لایسنس آزاد شده (بعد از Log out/انتقال) → به دستگاه درخواست‌دهنده گره می‌خوره
+//     (خرید به اکانت فروشگاه وصله، نه به یک دستگاه).
+//   • لایسنس هنوز روی دستگاه دیگه فعاله → conflict (یک خرید = یک دستگاه).
+//   • لایسنس استردادشده (revoked) → رد می‌شه.
+// خروجی: { status: "missing" | "conflict" | "revoked" | "ok", ... }
+// extraLicenseFields(prev) فیلدهای مخصوص هر فروشگاه رو برای ساخت مجدد سند لایسنس
+// (اگه به هر دلیلی پاک شده باشه) برمی‌گردونه.
+async function bindExistingStorePurchase({
+  collectionName,
+  source,
+  extraLicenseFields,
+  purchaseToken,
+  fingerprint,
+  appId,
+  hardwareSignature,
+  appGeneration,
+}) {
+  const purchaseRef = db.collection(collectionName).doc(purchaseToken);
+
+  const outcome = await db.runTransaction(async (tx) => {
+    const purchaseSnap = await tx.get(purchaseRef);
+    if (!purchaseSnap.exists) return { status: "missing" };
+    const prev = purchaseSnap.data();
+    if (prev.appId !== appId) return { status: "conflict" };
+
+    const licenseRef = db.collection("licenses").doc(prev.licenseCode);
+    const licenseSnap = await tx.get(licenseRef);
+    const binding = {
+      is_used: true,
+      fingerprint,
+      appId,
+      hardwareSignature: hardwareSignature || null,
+      activated_at: admin.firestore.FieldValue.serverTimestamp(),
+      expires_at: null,
+    };
+
+    if (!licenseSnap.exists) {
+      tx.set(licenseRef, {
+        tier: prev.tier,
+        license_type: prev.licenseType,
+        appGeneration: appGeneration || CURRENT_APP_GENERATION,
+        is_shared: false,
+        ...binding,
+        source,
+        ...extraLicenseFields(prev),
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    } else {
+      const lic = licenseSnap.data();
+      if (lic.revoked === true) return { status: "revoked" };
+      if (lic.is_used) {
+        if (lic.fingerprint !== fingerprint || lic.appId !== appId) {
+          return { status: "conflict" };
+        }
+        // همان دستگاه → چیزی برای تغییر نیست
+      } else {
+        tx.update(licenseRef, binding);
+      }
+    }
+
+    if (prev.fingerprint !== fingerprint) {
+      tx.update(purchaseRef, {
+        fingerprint,
+        reboundAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+    return { status: "ok", prev };
+  });
+
+  if (outcome.status !== "ok") return outcome;
+
+  // set+merge و idempotent؛ اگه دفعه‌ی قبل بین تراکنش و linkDevice سرور قطع شده
+  // باشه، این‌جا ایندکس دستگاه هم ترمیم می‌شه.
+  const { prev } = outcome;
+  await linkDevice(
+    fingerprint,
+    appId,
+    prev.licenseType,
+    prev.licenseCode,
+    appGeneration,
+  );
+  const token = createSignedToken(
+    fingerprint,
+    appId,
+    prev.licenseCode,
+    prev.licenseType,
+    null,
+    prev.tier,
+  );
+  return {
+    status: "ok",
+    token,
+    licenseType: prev.licenseType,
+    tier: prev.tier,
+    licenseCode: prev.licenseCode,
+  };
+}
+
+// پاسخ HTTP مشترک برای خروجی bindExistingStorePurchase (به‌جز "missing").
+// پیام‌ها انگلیسی‌اند چون UI اپ انگلیسیه؛ اپ بر اساس `code` پیام خودش رو می‌سازه.
+function sendStoreBindResult(res, r) {
+  if (r.status === "conflict") {
+    return res.status(409).json({
+      success: false,
+      code: "LICENSE_IN_USE_ELSEWHERE",
+      error:
+        "This purchase is already active on another device. Use Log out (transfer license) on that device first, then try again.",
+    });
+  }
+  if (r.status === "revoked") {
+    return res.status(403).json({
+      success: false,
+      code: "PURCHASE_REVOKED",
+      error: "This purchase was refunded and its license is no longer valid.",
+    });
+  }
+  if (r.status !== "ok") {
+    return res
+      .status(500)
+      .json({ success: false, code: "SERVER_ERROR", error: "Server error" });
+  }
+  return res.status(200).json({
+    success: true,
+    token: r.token,
+    licenseType: r.licenseType,
+    tier: r.tier,
+    licenseCode: r.licenseCode,
+    expiresAt: null,
+  });
+}
+
+// ── چک دوره‌ای استرداد وجه گوگل پلی (غیرفعال به‌صورت پیش‌فرض) ───────────────
+// با env GOOGLE_PLAY_REVALIDATE_HOURS (مثلاً 24) فعال می‌شه. در /signin، برای
+// لایسنس‌های گوگل پلی که بیش از این مدت از آخرین تایید گذشته، دوباره از
+// Google Play Developer API پرسیده می‌شه. Fail-open: هر خطای شبکه/API یعنی
+// «معتبر» (کاربر پولی قفل نشه). فقط وقتی گوگل صریحاً purchaseState=1 (لغو/استرداد)
+// بده، لایسنس revoked می‌شه؛ PENDING (2) عمداً revoke نمی‌کنه.
+// ⚠️ قبل از روشن کردن در تولید، رفتار گوگل برای یک خرید تستیِ مسترد‌شده رو امتحان کن.
+const GOOGLE_PLAY_REVALIDATE_MS =
+  (Number(process.env.GOOGLE_PLAY_REVALIDATE_HOURS) || 0) * 60 * 60 * 1000;
+
+async function isGooglePlayPurchaseRevoked(licenseRef, data) {
+  if (data.revoked === true) return true;
+  if (!GOOGLE_PLAY_REVALIDATE_MS || !googlePlayAuth) return false;
+  if (
+    !data.google_play_purchase_token ||
+    !data.google_play_product_id ||
+    !data.appId
+  )
+    return false;
+
+  const lastMs = data.google_play_verified_at
+    ? data.google_play_verified_at.toMillis()
+    : data.activated_at
+      ? data.activated_at.toMillis()
+      : 0;
+  if (Date.now() - lastMs < GOOGLE_PLAY_REVALIDATE_MS) return false;
+
+  try {
+    const accessToken = await getGooglePlayAccessToken();
+    const verifyUrl = `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${encodeURIComponent(
+      data.appId,
+    )}/purchases/products/${encodeURIComponent(
+      data.google_play_product_id,
+    )}/tokens/${encodeURIComponent(data.google_play_purchase_token)}`;
+    const r = await fetch(verifyUrl, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j) return false; // fail-open
+
+    if (j.purchaseState === 1) {
+      await licenseRef.update({
+        revoked: true,
+        revokedAt: admin.firestore.FieldValue.serverTimestamp(),
+        revokeReason: `google_play purchaseState=${j.purchaseState}`,
+      });
+      return true;
+    }
+    await licenseRef
+      .update({
+        google_play_verified_at: admin.firestore.FieldValue.serverTimestamp(),
+      })
+      .catch(() => {});
+    return false;
+  } catch (err) {
+    console.error("گوگل پلی: خطا در بازبینی دوره‌ای خرید:", err);
+    return false; // fail-open
+  }
+}
 
 // ════════════════════════════════════════════════════════════════════════
 //  تایید خرید گوگل پلی → ساخت خودکار و فعال‌سازی فوری لایسنس
@@ -1806,46 +2203,51 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
     if (!purchaseToken || !productId || !fingerprint || !appId) {
       return res.status(400).json({
         success: false,
+        code: "MISSING_FIELDS",
         error: "purchaseToken, productId, fingerprint and appId are required",
       });
     }
 
     if (!isValidAppId(appId)) {
-      return res.status(400).json({ success: false, error: "Unknown appId" });
+      return res
+        .status(400)
+        .json({ success: false, code: "UNKNOWN_APP", error: "Unknown appId" });
     }
 
     const info = GOOGLE_PLAY_SKU_LICENSE_MAP[productId];
     if (!info) {
       console.error(`گوگل پلی: productId ناشناخته (${productId})`);
-      return res.status(400).json({ success: false, error: "Unknown product" });
-    }
-
-    // ── idempotency: این purchaseToken قبلاً پردازش شده؟ ─────────────
-    // (چه به‌خاطر retry شبکه‌ای کلاینت، چه سوءاستفاده‌ی عمدی از یک توکن قدیمی)
-    const purchaseRef = db.collection("googlePlayPurchases").doc(purchaseToken);
-    const existingPurchase = await purchaseRef.get();
-    if (existingPurchase.exists) {
-      const prev = existingPurchase.data();
-      const token = createSignedToken(
-        prev.fingerprint,
-        prev.appId,
-        prev.licenseCode,
-        prev.licenseType,
-        null,
-        prev.tier,
-      );
-      return res.status(200).json({
-        success: true,
-        token,
-        licenseType: prev.licenseType,
-        tier: prev.tier,
-        licenseCode: prev.licenseCode,
-        expiresAt: null,
+      return res.status(400).json({
+        success: false,
+        code: "UNKNOWN_PRODUCT",
+        error: "Unknown product",
       });
     }
 
+    // ── idempotency + انتقال لایسنس: این purchaseToken قبلاً پردازش شده؟ ──
+    // (retry بعد از timeout، یا بازیابی روی دستگاه جدید بعد از Log out)
+    const purchaseRef = db.collection("googlePlayPurchases").doc(purchaseToken);
+    const googleExtraFields = (prev) => ({
+      google_play_product_id: prev.productId,
+      google_play_purchase_token: purchaseToken,
+      google_play_verified_at: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    const bindArgs = {
+      collectionName: "googlePlayPurchases",
+      source: "google_play",
+      extraLicenseFields: googleExtraFields,
+      purchaseToken,
+      fingerprint,
+      appId,
+      hardwareSignature,
+      appGeneration,
+    };
+    const existing = await bindExistingStorePurchase(bindArgs);
+    if (existing.status !== "missing") {
+      return sendStoreBindResult(res, existing);
+    }
+
     // ── صحت‌سنجی خرید با Google Play Developer API (server-to-server) ─
-    // طبق مستندات رسمی گوگل (Android Publisher API v3 → purchases.products.get):
     // GET با Authorization: Bearer {access_token} روی
     // /androidpublisher/v3/applications/{packageName}/purchases/products/{productId}/tokens/{token}
     let purchaseData;
@@ -1859,27 +2261,51 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
       const googleRes = await fetch(verifyUrl, {
         method: "GET",
         headers: { Authorization: `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(15000),
       });
       purchaseData = await googleRes.json();
       if (!googleRes.ok || purchaseData.error) {
         console.error("گوگل پلی: خطای verify API:", purchaseData);
+        // توکن نامعتبر/ناموجود: تکرار فایده‌ای نداره → ردّ قطعی (نه خطای موقت)
+        if ([400, 404, 410].includes(googleRes.status)) {
+          return res.status(403).json({
+            success: false,
+            code: "PURCHASE_NOT_FOUND",
+            error: "Google Play could not find this purchase.",
+          });
+        }
         return res.status(502).json({
           success: false,
-          error: purchaseData?.error?.message || "Purchase verification failed",
+          code: "GOOGLE_VERIFY_FAILED",
+          error: "Could not verify the purchase with Google Play right now.",
         });
       }
     } catch (err) {
       console.error("گوگل پلی: خطا در اتصال به verify API:", err);
-      return res
-        .status(502)
-        .json({ success: false, error: "Could not reach Google Play" });
+      return res.status(502).json({
+        success: false,
+        code: "GOOGLE_UNREACHABLE",
+        error: "Could not reach Google Play",
+      });
     }
 
-    // طبق مستندات گوگل: purchaseState === 0 یعنی خرید موفق (1 = لغوشده، 2 = در انتظار)
+    // purchaseState === 0 یعنی خرید موفق (1 = لغوشده، 2 = در انتظار)
     if (purchaseData.purchaseState !== 0) {
-      return res
-        .status(403)
-        .json({ success: false, error: "Purchase not successful" });
+      return res.status(403).json({
+        success: false,
+        code: "PURCHASE_NOT_COMPLETED",
+        error: "Purchase not completed",
+      });
+    }
+
+    // fingerprint دستگاهی که خرید رو انجام داده (obfuscatedAccountId). عمداً
+    // «اجباری» نیست: بعد از factory reset یا دستگاه جدید fingerprint عوض می‌شه و
+    // خریدار واقعی نباید قفل بشه. فقط ثبت می‌شه و عدم تطابق لاگ می‌شه.
+    const originFingerprint = purchaseData.obfuscatedExternalAccountId || null;
+    if (originFingerprint && originFingerprint !== fingerprint) {
+      console.warn(
+        `گوگل پلی: fingerprint خرید با دستگاه درخواست‌دهنده فرق دارد (token=${purchaseToken.slice(0, 8)}…)`,
+      );
     }
 
     // ── acknowledge خرید سمت سرور، اگه کلاینت هنوز این کار رو نکرده ────
@@ -1892,18 +2318,23 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
         )}/purchases/products/${encodeURIComponent(
           productId,
         )}/tokens/${encodeURIComponent(purchaseToken)}:acknowledge`;
-        await fetch(ackUrl, {
+        const ackRes = await fetch(ackUrl, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${accessToken}`,
             "Content-Type": "application/json",
           },
           body: JSON.stringify({}),
+          signal: AbortSignal.timeout(10000),
         });
+        if (!ackRes.ok) {
+          console.error(
+            "گوگل پلی: acknowledge سمت سرور ناموفق بود:",
+            ackRes.status,
+          );
+        }
       } catch (err) {
-        // اگه acknowledge سمت سرور شکست بخوره، مشکلی نیست — کلاینت هم
-        // سعی می‌کنه acknowledge کنه؛ فقط لاگ می‌کنیم و ادامه می‌دیم چون
-        // خودِ فعال‌سازی لایسنس نباید به این وابسته باشه.
+        // مشکلی نیست — کلاینت هم acknowledge می‌کنه؛ فعال‌سازی به این وابسته نیست.
         console.error("گوگل پلی: خطا در acknowledge سمت سرور:", err);
       }
     }
@@ -1913,7 +2344,17 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
     const tier = info.tier;
     const licenseType = info.license_type;
 
+    let lostRace = false;
     await db.runTransaction(async (tx) => {
+      lostRace = false;
+      // درخواست هم‌زمان دیگه‌ای (مثلاً retry یا بازیابی هم‌زمان کلاینت) ممکنه
+      // همین توکن رو همین الان ثبت کرده باشه؛ داخل تراکنش دوباره چک می‌کنیم.
+      const again = await tx.get(purchaseRef);
+      if (again.exists) {
+        lostRace = true;
+        return;
+      }
+
       tx.set(db.collection("licenses").doc(licenseCode), {
         tier,
         license_type: licenseType,
@@ -1926,6 +2367,7 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
         source: "google_play",
         google_play_product_id: productId,
         google_play_purchase_token: purchaseToken,
+        google_play_verified_at: admin.firestore.FieldValue.serverTimestamp(),
         activated_at: admin.firestore.FieldValue.serverTimestamp(),
         expires_at: null, // فقط lifetime می‌فروشیم
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -1934,6 +2376,7 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
       tx.set(purchaseRef, {
         productId,
         fingerprint,
+        originFingerprint,
         appId,
         licenseCode,
         licenseType,
@@ -1941,6 +2384,11 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
         processedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
     });
+
+    if (lostRace) {
+      const raced = await bindExistingStorePurchase(bindArgs);
+      return sendStoreBindResult(res, raced);
+    }
 
     await linkDevice(
       fingerprint,
@@ -1969,7 +2417,9 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
     });
   } catch (err) {
     console.error("خطا در تایید خرید گوگل پلی:", err);
-    return res.status(500).json({ success: false, error: "Server error" });
+    return res
+      .status(500)
+      .json({ success: false, code: "SERVER_ERROR", error: "Server error" });
   }
 });
 
@@ -2020,26 +2470,24 @@ app.post("/bazaar/verify-purchase", async (req, res) => {
 
     // ── idempotency: این purchaseToken قبلاً پردازش شده؟ ─────────────
     // (چه به‌خاطر retry شبکه‌ای کلاینت، چه سوءاستفاده‌ی عمدی از یک توکن قدیمی)
+    // + انتقال لایسنس به دستگاه جدید (bindExistingStorePurchase)
     const purchaseRef = db.collection("bazaarPurchases").doc(purchaseToken);
-    const existingPurchase = await purchaseRef.get();
-    if (existingPurchase.exists) {
-      const prev = existingPurchase.data();
-      const token = createSignedToken(
-        prev.fingerprint,
-        prev.appId,
-        prev.licenseCode,
-        prev.licenseType,
-        null,
-        prev.tier,
-      );
-      return res.status(200).json({
-        success: true,
-        token,
-        licenseType: prev.licenseType,
-        tier: prev.tier,
-        licenseCode: prev.licenseCode,
-        expiresAt: null,
-      });
+    const bazaarBindArgs = {
+      collectionName: "bazaarPurchases",
+      source: "bazaar",
+      extraLicenseFields: (prev) => ({
+        bazaar_sku_id: prev.skuId,
+        bazaar_purchase_token: purchaseToken,
+      }),
+      purchaseToken,
+      fingerprint,
+      appId,
+      hardwareSignature,
+      appGeneration,
+    };
+    const existingBazaar = await bindExistingStorePurchase(bazaarBindArgs);
+    if (existingBazaar.status !== "missing") {
+      return sendStoreBindResult(res, existingBazaar);
     }
 
     // ── صحت‌سنجی خرید با سرور بازار (server-to-server) ───────────────
@@ -2086,7 +2534,15 @@ app.post("/bazaar/verify-purchase", async (req, res) => {
     const tier = info.tier;
     const licenseType = info.license_type;
 
+    let bazaarLostRace = false;
     await db.runTransaction(async (tx) => {
+      bazaarLostRace = false;
+      // درخواست هم‌زمان دیگه‌ای ممکنه همین توکن رو ثبت کرده باشه
+      const again = await tx.get(purchaseRef);
+      if (again.exists) {
+        bazaarLostRace = true;
+        return;
+      }
       tx.set(db.collection("licenses").doc(licenseCode), {
         tier,
         license_type: licenseType,
@@ -2114,6 +2570,11 @@ app.post("/bazaar/verify-purchase", async (req, res) => {
         processedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
     });
+
+    if (bazaarLostRace) {
+      const racedBazaar = await bindExistingStorePurchase(bazaarBindArgs);
+      return sendStoreBindResult(res, racedBazaar);
+    }
 
     await linkDevice(
       fingerprint,
@@ -2507,6 +2968,23 @@ app.post("/signin", async (req, res) => {
         )
           continue;
         expiresAt = data.expires_at ? data.expires_at.toMillis() : null;
+      }
+
+      // ── لایسنس استردادشده (revoked) یا خرید مایکتِ مسترد‌شده ──────────────
+      if (data.revoked === true) continue;
+      if (
+        !data.is_shared &&
+        data.source === "myket" &&
+        (await isMyketPurchaseRevoked(licenseDoc.ref, data))
+      ) {
+        continue;
+      }
+      if (
+        !data.is_shared &&
+        data.source === "google_play" &&
+        (await isGooglePlayPurchaseRevoked(licenseDoc.ref, data))
+      ) {
+        continue;
       }
 
       // ── ارتقای خودکار probation → lifetime (فاصله‌ی غیرعادیِ expires_at) ──
