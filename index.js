@@ -2541,7 +2541,12 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
 
     // ── acknowledge خرید سمت سرور، اگه کلاینت هنوز این کار رو نکرده ────
     // acknowledgementState: 0 = تاییدنشده، 1 = تاییدشده
-    if (purchaseData.acknowledgementState === 0) {
+    // برای خرید «پایه» همین‌جا (قبل از ساخت لایسنس) انجام می‌شه. برای «ارتقا»
+    // عمداً بعد از موفقیت تراکنش ارتقا صدا زده می‌شه (پایین‌تر)، تا اگه ارتقا
+    // در آخرین لحظه رد شد (race)، خرید Acknowledge‌نشده بمونه و گوگل ظرف ۳ روز
+    // خودکار پول رو برگردونه.
+    const ackOnServer = async () => {
+      if (purchaseData.acknowledgementState !== 0) return;
       try {
         const accessToken = await getGooglePlayAccessToken();
         const ackUrl = `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${encodeURIComponent(
@@ -2568,7 +2573,8 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
         // مشکلی نیست — کلاینت هم acknowledge می‌کنه؛ فعال‌سازی به این وابسته نیست.
         console.error("گوگل پلی: خطا در acknowledge سمت سرور:", err);
       }
-    }
+    };
+    if (!isUpgrade) await ackOnServer();
 
     // ── ارتقا: سطح لایسنس فعلی رو بالا ببر (لایسنس جدید نساز) ────────────
     if (isUpgrade) {
@@ -2616,6 +2622,9 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
         return sendStoreBindResult(res, raced);
       }
       if (up.status === "rejected") return sendUpgradeRejected(res, up.code);
+
+      // ارتقا با موفقیت اعمال شد → حالا Acknowledge
+      await ackOnServer();
 
       const upToken = createSignedToken(
         fingerprint,
