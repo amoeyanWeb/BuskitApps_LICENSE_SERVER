@@ -445,6 +445,113 @@ async function getGooglePlayAccessToken() {
   return token;
 }
 
+// ── هواوی IAP (Huawei Order Service API — برای صحت‌سنجی خرید) ────────────
+// برای اپ نسخه‌ی AppGallery. سرور با OAuth2 (client_credentials) یک access_token
+// می‌گیره و با اون توکن خرید رو از سرورهای هواوی چک می‌کنه (نه از کلاینت).
+// env های لازم:
+//   HUAWEI_IAP_CLIENT_ID / HUAWEI_IAP_CLIENT_SECRET
+//       → AppGallery Connect → Project settings → (Server-side) Client ID / Secret
+//         (همون «API client» پروژه؛ باید به IAP دسترسی داشته باشه)
+//   HUAWEI_IAP_ORDER_URL (اختیاری)
+//       → دامنه‌ی Order Service مطابق Data Storage Location پروژه توی AGC.
+//         پیش‌فرض: اروپا. اگه پروژه‌ات سایت دیگه‌ای داره، دامنه‌ی همون سایت رو
+//         از مستندات رسمی «Order Service» هواوی بذار (بدون / آخر).
+//   HUAWEI_REVALIDATE_HOURS (اختیاری) → چک دوره‌ای استرداد، مثل گوگل پلی/مایکت
+const HUAWEI_IAP_CLIENT_ID = process.env.HUAWEI_IAP_CLIENT_ID;
+const HUAWEI_IAP_CLIENT_SECRET = process.env.HUAWEI_IAP_CLIENT_SECRET;
+const HUAWEI_IAP_ORDER_URL = (
+  process.env.HUAWEI_IAP_ORDER_URL || "https://orders-at-dre.iap.dbankcloud.com"
+).replace(/\/+$/, "");
+const HUAWEI_OAUTH_URL = "https://oauth-login.cloud.huawei.com/oauth2/v3/token";
+
+let huaweiTokenCache = { accessToken: null, expiresAt: 0 };
+
+async function getHuaweiAccessToken(forceRefresh = false) {
+  if (
+    !forceRefresh &&
+    huaweiTokenCache.accessToken &&
+    Date.now() < huaweiTokenCache.expiresAt
+  ) {
+    return huaweiTokenCache.accessToken;
+  }
+  if (!HUAWEI_IAP_CLIENT_ID || !HUAWEI_IAP_CLIENT_SECRET) {
+    throw new Error("HUAWEI_IAP_CLIENT_ID / HUAWEI_IAP_CLIENT_SECRET تنظیم نشده");
+  }
+  const body = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: HUAWEI_IAP_CLIENT_ID,
+    client_secret: HUAWEI_IAP_CLIENT_SECRET,
+  });
+  const r = await fetch(HUAWEI_OAUTH_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+    signal: AbortSignal.timeout(10000),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.access_token) {
+    throw new Error(
+      `گرفتن access token هواوی شکست خورد: ${j.error || j.error_description || r.status}`,
+    );
+  }
+  huaweiTokenCache = {
+    accessToken: j.access_token,
+    expiresAt: Date.now() + (Number(j.expires_in) || 3600) * 1000 - 60_000,
+  };
+  return huaweiTokenCache.accessToken;
+}
+
+// شناسه‌ی سند Firestore برای یک purchaseToken هواوی. توکن‌های هواوی طولانی‌ان و
+// ممکنه کاراکتر ناجور داشته باشن؛ هش SHA-256 یک docId امن و یکتا می‌ده.
+function huaweiPurchaseDocId(purchaseToken) {
+  return crypto.createHash("sha256").update(String(purchaseToken)).digest("hex");
+}
+
+// POST {order-url}/applications/purchases/tokens/verify
+// خروجی:
+//   { ok: true,  data }                → data = purchaseTokenData پارس‌شده
+//   { ok: false, definitive: true }    → هواوی صریحاً توکن رو قبول نکرد (responseCode≠0)
+//   { ok: false, definitive: false }   → خطای موقت/شبکه/سرور هواوی (قابل تکرار)
+async function verifyHuaweiPurchaseToken(productId, purchaseToken) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const accessToken = await getHuaweiAccessToken(attempt > 0);
+    const r = await fetch(
+      `${HUAWEI_IAP_ORDER_URL}/applications/purchases/tokens/verify`,
+      {
+        method: "POST",
+        headers: {
+          Authorization:
+            "Basic " + Buffer.from(`APPAT:${accessToken}`).toString("base64"),
+          "Content-Type": "application/json; charset=UTF-8",
+        },
+        body: JSON.stringify({ purchaseToken, productId }),
+        signal: AbortSignal.timeout(15000),
+      },
+    );
+    // access_token منقضی/نامعتبر → یک بار با توکن تازه تکرار کن
+    if (r.status === 401 && attempt === 0) continue;
+
+    const body = await r.json().catch(() => null);
+    if (!r.ok || !body) {
+      console.error("هواوی: پاسخ verify نامعتبر:", r.status, body);
+      return { ok: false, definitive: false, body };
+    }
+    if (String(body.responseCode) !== "0") {
+      console.error("هواوی: verify رد شد:", body);
+      return { ok: false, definitive: true, body };
+    }
+    let data;
+    try {
+      data = JSON.parse(body.purchaseTokenData);
+    } catch (e) {
+      console.error("هواوی: purchaseTokenData قابل پارس نبود:", e);
+      return { ok: false, definitive: false, body };
+    }
+    return { ok: true, data, body };
+  }
+  return { ok: false, definitive: false, body: null };
+}
+
 // ── توکن دسترسی کافه‌بازار (OAuth2 — refresh_token → access_token) ────────
 // این بخش برای بیلد جداگانه‌ای از اپه که مخصوص کافه‌بازار منتشر می‌شه (نه
 // همین اپ اصلی که الان فقط گوگل پلی رو داره) — سرور همچنان از هر دو بیلد
@@ -597,7 +704,12 @@ const AUTO_LIFETIME_GAP_MS = 90 * 24 * 60 * 60 * 1000; // ۳ ماه
 // چون کلاینت appId رو از context.packageName می‌فرسته، همین مقدار هم کلید
 // لایسنس/دستگاه روی سرور هست و هم packageName ای که به Google Play Developer
 // API داده می‌شه. com.BuskitApp.Tools هم برای بقیه‌ی اپ‌ها مثل قبل کار می‌کنه.
-const ALLOWED_APP_IDS = ["com.BuskitApp.Tools", "com.BuskitTools"];
+const ALLOWED_APP_IDS = [
+  "com.BuskitApp.Tools",
+  "com.BuskitTools",
+  "com.BuskitToolsV2",
+  "buskittools.lifetime", // applicationId جدید گوگل پلی (تک اپ برای هر سه سطح)
+];
 
 // ── fingerprint رو برای Firestore document ID ایمن کن ────────────────────
 function toSafeId(fingerprint) {
@@ -639,14 +751,30 @@ function createSignedToken(
   return Buffer.from(payload).toString("base64") + "|" + signature;
 }
 
-// ── سطح لایسنس رو با fail-safe از سند لایسنس بخون ──────────────────────
-// دیگه فقط یک سطح ("gold") وجود داره چون فقط یک محصول می‌فروشی. اگه به هر
-// دلیلی (داده‌ی قدیمی از قبل که bronze/silver داشت، یا فیلد خالی) مقدار
-// نامعتبر بود، به‌جای این‌که کاربر رو قفل کنیم (fail-closed به یک سطح
-// پایین‌تر که دیگه اصلاً وجود نداره)، همون "gold" برمی‌گردونیم — چون همه‌ی
-// لایسنس‌های معتبر الان یک سطح دارن.
+// ── سه سطح (Edition) اپ: miniTools / Tools / ToolsPRO ─────────────────────
+// فقط «یک اپ» (یک applicationId) وجود داره؛ سطح لایسنس روی سند لایسنس
+// (فیلد tier) ذخیره می‌شه و موقع ساین‌این/فعال‌سازی داخل توکن امضاشده‌ی RSA
+// (payload.tier) به اپ برمی‌گرده. اپ با همین فیلد تصمیم می‌گیره کدوم امکانات
+// رو نشون بده. چون payload امضا شده، کاربر نمی‌تونه سطح رو در توکن دستکاری کنه.
+const TIERS = ["mini", "tools", "pro"];
+const TIER_RANK = { mini: 1, tools: 2, pro: 3 };
+// مقادیر قدیمی (از زمانی که bronze/silver/gold داشتی) به سطح جدید نگاشت می‌شن.
+const LEGACY_TIER_ALIASES = { bronze: "mini", silver: "tools", gold: "pro" };
+
+function normalizeTier(raw) {
+  if (typeof raw !== "string") return null;
+  const t = raw.trim().toLowerCase();
+  if (TIER_RANK[t]) return t;
+  return LEGACY_TIER_ALIASES[t] || null;
+}
+
+// ── سطح لایسنس رو از سند لایسنس بخون ───────────────────────────────────
+// ⚠️ سندهای قدیمی که فیلد tier ندارن (همه‌ی خریدارهای قبلی، که تک‌محصولی و
+// «gold» بودن) عمداً "pro" حساب می‌شن تا کاربر پولی فعلی چیزی از دست نده
+// (grandfathering). برای هر لایسنس جدیدی که دستی توی Firestore می‌سازی،
+// حتماً فیلد tier رو (mini | tools | pro) پر کن، وگرنه PRO می‌شه.
 function resolveTier(licenseData) {
-  return "gold";
+  return normalizeTier(licenseData && licenseData.tier) || "pro";
 }
 
 // ── appGeneration: شناسه‌ی «نسل» اپ (برای نسخه‌های بعدی/اپ‌های جدید) ──────
@@ -764,7 +892,10 @@ function isValidAppId(appId) {
 // ورودی محدود شده. اگه فرم خرید سایت هنوز فعاله، مطمئن شو فقط همین یک
 // productKey ("p1") رو به سرور می‌فرسته.
 const PRODUCT_LICENSE_MAP = {
-  p1: { tier: "gold", license_type: "lifetime", appGeneration: "v1" },
+  p1: { tier: "pro", license_type: "lifetime", appGeneration: "v1" }, // قدیمی = PRO
+  pmini: { tier: "mini", license_type: "lifetime", appGeneration: "v1" },
+  ptools: { tier: "tools", license_type: "lifetime", appGeneration: "v1" },
+  ppro: { tier: "pro", license_type: "lifetime", appGeneration: "v1" },
 };
 
 // ── نگاشت variant_id لمون‌اسکوییزی → سطح و مدت لایسنس ─────────────────────
@@ -774,7 +905,7 @@ const PRODUCT_LICENSE_MAP = {
 // عمداً سمت سرور نگه داشته می‌شه (نه چیزی که از بدنه‌ی وبهوک خونده بشه)،
 // تا کسی نتونه با جعل payload لایسنس مجانی بگیره.
 const LS_VARIANT_LICENSE_MAP = {
-  2059669: { tier: "gold", license_type: "lifetime", appGeneration: "v1" },
+  2059669: { tier: "pro", license_type: "lifetime", appGeneration: "v1" },
 };
 
 // ── نگاشت skuId مایکت → سطح و مدت لایسنس ──────────────────────────────
@@ -784,7 +915,7 @@ const LS_VARIANT_LICENSE_MAP = {
 // عمداً سمت سرور نگه داشته می‌شه، نه چیزی که از body درخواست خونده بشه.
 const MYKET_SKU_LICENSE_MAP = {
   buskit_lifetime: {
-    tier: "gold",
+    tier: "pro",
     license_type: "lifetime",
     appGeneration: "v1",
   },
@@ -796,8 +927,33 @@ const MYKET_SKU_LICENSE_MAP = {
 // Console → Monetize → Products → In-app products ساختی. عمداً سمت سرور
 // نگه داشته می‌شه، نه چیزی که از body درخواست خونده بشه.
 const GOOGLE_PLAY_SKU_LICENSE_MAP = {
+  // ── خرید مستقیم هر سطح (لایسنس جدید می‌سازه) ──────────────────────────
+  buskit_mini: { tier: "mini", license_type: "lifetime", appGeneration: "v1" },
+  buskit_tools: { tier: "tools", license_type: "lifetime", appGeneration: "v1" },
+  buskit_pro: { tier: "pro", license_type: "lifetime", appGeneration: "v1" },
+  // ── محصول قدیمی تک‌سطحی: خریدارهای قبلی = PRO (grandfathering) ─────────
+  buskit_lifetime: { tier: "pro", license_type: "lifetime", appGeneration: "v1" },
+  // ── محصول‌های «ارتقا» (قیمت = اختلاف دو سطح). لایسنس جدید نمی‌سازن؛ سطحِ
+  //    همون لایسنسِ فعلیِ دستگاه رو بالا می‌برن. upgradeFrom = سطحی که کاربر
+  //    باید همین الان داشته باشه. ─────────────────────────────────────────
+  buskit_up_mini_tools: {
+    tier: "tools", upgradeFrom: "mini", license_type: "lifetime", appGeneration: "v1",
+  },
+  buskit_up_mini_pro: {
+    tier: "pro", upgradeFrom: "mini", license_type: "lifetime", appGeneration: "v1",
+  },
+  buskit_up_tools_pro: {
+    tier: "pro", upgradeFrom: "tools", license_type: "lifetime", appGeneration: "v1",
+  },
+};
+
+// ── نگاشت productId هواوی → سطح و مدت لایسنس ────────────────────────────
+// کلید باید حرف‌به‌حرف همون Product ID توی AppGallery Connect → Operate →
+// Products → Product management باشه (نوع: Non-consumable). عمداً سمت سرور
+// نگه داشته می‌شه، نه چیزی که از body درخواست خونده بشه.
+const HUAWEI_SKU_LICENSE_MAP = {
   buskit_lifetime: {
-    tier: "gold",
+    tier: "pro",
     license_type: "lifetime",
     appGeneration: "v1",
   },
@@ -810,7 +966,7 @@ const GOOGLE_PLAY_SKU_LICENSE_MAP = {
 // عمداً سمت سرور نگه داشته می‌شه، نه چیزی که از body درخواست خونده بشه.
 const BAZAAR_SKU_LICENSE_MAP = {
   buskit_lifetime: {
-    tier: "gold",
+    tier: "pro",
     license_type: "lifetime",
     appGeneration: "v1",
   },
@@ -1163,7 +1319,7 @@ app.post("/request-probation-license", async (req, res) => {
       .collection("licenses")
       .doc(licenseCode)
       .set({
-        tier: "gold",
+        tier: "pro",
         license_type: "probation",
         appGeneration: CURRENT_APP_GENERATION,
         is_shared: false,
@@ -1999,6 +2155,9 @@ async function bindExistingStorePurchase({
     if (!purchaseSnap.exists) return { status: "missing" };
     const prev = purchaseSnap.data();
     if (prev.appId !== appId) return { status: "conflict" };
+    // سطحِ «فعلی» لایسنس؛ اگه کاربر بعداً ارتقا داده، توکن باید سطح جدید رو
+    // بگیره حتی وقتی با purchaseToken خرید پایه‌ی قدیمی بازیابی می‌کنه.
+    let liveTier = prev.tier;
 
     const licenseRef = db.collection("licenses").doc(prev.licenseCode);
     const licenseSnap = await tx.get(licenseRef);
@@ -2025,6 +2184,7 @@ async function bindExistingStorePurchase({
     } else {
       const lic = licenseSnap.data();
       if (lic.revoked === true) return { status: "revoked" };
+      liveTier = resolveTier(lic);
       if (lic.is_used) {
         if (lic.fingerprint !== fingerprint || lic.appId !== appId) {
           return { status: "conflict" };
@@ -2041,14 +2201,14 @@ async function bindExistingStorePurchase({
         reboundAt: admin.firestore.FieldValue.serverTimestamp(),
       });
     }
-    return { status: "ok", prev };
+    return { status: "ok", prev, liveTier };
   });
 
   if (outcome.status !== "ok") return outcome;
 
   // set+merge و idempotent؛ اگه دفعه‌ی قبل بین تراکنش و linkDevice سرور قطع شده
   // باشه، این‌جا ایندکس دستگاه هم ترمیم می‌شه.
-  const { prev } = outcome;
+  const { prev, liveTier } = outcome;
   await linkDevice(
     fingerprint,
     appId,
@@ -2062,13 +2222,13 @@ async function bindExistingStorePurchase({
     prev.licenseCode,
     prev.licenseType,
     null,
-    prev.tier,
+    liveTier,
   );
   return {
     status: "ok",
     token,
     licenseType: prev.licenseType,
-    tier: prev.tier,
+    tier: liveTier,
     licenseCode: prev.licenseCode,
   };
 }
@@ -2103,6 +2263,58 @@ function sendStoreBindResult(res, r) {
     tier: r.tier,
     licenseCode: r.licenseCode,
     expiresAt: null,
+  });
+}
+
+// ── ارزیابی «ارتقای سطح» (miniTools → Tools → ToolsPRO) ─────────────────────
+// کاربر برای ارتقا فقط «اختلاف قیمت» رو می‌ده: یک محصول Play جدا (buskit_up_*)
+// که لایسنس جدید نمی‌سازه، فقط tier همون لایسنسِ مادام‌العمرِ فعلیِ همین
+// دستگاه رو بالا می‌بره. شرط‌ها:
+//   ۱) همین دستگاه یک لایسنس lifetime معتبر و فعال (is_used، نه revoked) داشته باشه
+//   ۲) tier فعلیِ اون لایسنس دقیقاً برابر info.upgradeFrom باشه
+// tx اختیاریه: بدون tx = پیش‌بررسی سریع (قبل از acknowledge)، با tx = بررسی
+// نهایی داخل تراکنش (جلوی race).
+async function evaluateUpgrade(fingerprint, appId, info, tx) {
+  const read = (ref) => (tx ? tx.get(ref) : ref.get());
+  const devSnap = await read(
+    db.collection("devices").doc(deviceAppId(fingerprint, appId)),
+  );
+  const licenseCode = devSnap.exists
+    ? (devSnap.data().links || {}).lifetime
+    : null;
+  if (!licenseCode) return { ok: false, code: "UPGRADE_REQUIRES_LICENSE" };
+
+  const licRef = db.collection("licenses").doc(licenseCode);
+  const licSnap = await read(licRef);
+  if (!licSnap.exists) return { ok: false, code: "UPGRADE_REQUIRES_LICENSE" };
+
+  const lic = licSnap.data();
+  if (
+    lic.revoked === true ||
+    lic.is_shared === true ||
+    lic.is_used !== true ||
+    lic.fingerprint !== fingerprint ||
+    lic.appId !== appId ||
+    (lic.license_type ?? "lifetime") !== "lifetime"
+  ) {
+    return { ok: false, code: "UPGRADE_REQUIRES_LICENSE" };
+  }
+
+  const curTier = resolveTier(lic);
+  if (curTier !== info.upgradeFrom) {
+    return { ok: false, code: "UPGRADE_NOT_APPLICABLE", curTier };
+  }
+  return { ok: true, licenseCode, licRef, curTier };
+}
+
+function sendUpgradeRejected(res, code) {
+  return res.status(409).json({
+    success: false,
+    code,
+    error:
+      code === "UPGRADE_REQUIRES_LICENSE"
+        ? "An upgrade needs an active license on this device first."
+        : "This upgrade doesn't match your current plan.",
   });
 }
 
@@ -2308,6 +2520,16 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
       );
     }
 
+    // ── محصول «ارتقا»؟ قبل از acknowledge چک شرایط (نه بعدش) ─────────────
+    // اگه کاربر لایسنس مناسب نداره، عمداً acknowledge نمی‌کنیم تا گوگل
+    // ظرف ۳ روز خودکار پولش رو برگردونه (به‌جای اینکه پولی بره و ارتقایی
+    // اعمال نشه).
+    const isUpgrade = !!info.upgradeFrom;
+    if (isUpgrade) {
+      const pre = await evaluateUpgrade(fingerprint, appId, info, null);
+      if (!pre.ok) return sendUpgradeRejected(res, pre.code);
+    }
+
     // ── acknowledge خرید سمت سرور، اگه کلاینت هنوز این کار رو نکرده ────
     // acknowledgementState: 0 = تاییدنشده، 1 = تاییدشده
     if (purchaseData.acknowledgementState === 0) {
@@ -2337,6 +2559,71 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
         // مشکلی نیست — کلاینت هم acknowledge می‌کنه؛ فعال‌سازی به این وابسته نیست.
         console.error("گوگل پلی: خطا در acknowledge سمت سرور:", err);
       }
+    }
+
+    // ── ارتقا: سطح لایسنس فعلی رو بالا ببر (لایسنس جدید نساز) ────────────
+    if (isUpgrade) {
+      let up = null;
+      await db.runTransaction(async (tx) => {
+        up = null;
+        const again = await tx.get(purchaseRef);
+        if (again.exists) {
+          up = { status: "race" };
+          return;
+        }
+        const ev = await evaluateUpgrade(fingerprint, appId, info, tx);
+        if (!ev.ok) {
+          up = { status: "rejected", code: ev.code };
+          return;
+        }
+        tx.update(ev.licRef, {
+          tier: info.tier,
+          tierUpgradedFrom: ev.curTier,
+          tierUpgradedAt: admin.firestore.FieldValue.serverTimestamp(),
+          tierHistory: admin.firestore.FieldValue.arrayUnion({
+            from: ev.curTier,
+            to: info.tier,
+            productId,
+            at: Date.now(),
+          }),
+        });
+        tx.set(purchaseRef, {
+          productId,
+          fingerprint,
+          originFingerprint,
+          appId,
+          licenseCode: ev.licenseCode,
+          licenseType: "lifetime",
+          tier: info.tier,
+          isUpgrade: true,
+          upgradeFrom: ev.curTier,
+          processedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        up = { status: "ok", licenseCode: ev.licenseCode };
+      });
+
+      if (up.status === "race") {
+        const raced = await bindExistingStorePurchase(bindArgs);
+        return sendStoreBindResult(res, raced);
+      }
+      if (up.status === "rejected") return sendUpgradeRejected(res, up.code);
+
+      const upToken = createSignedToken(
+        fingerprint,
+        appId,
+        up.licenseCode,
+        "lifetime",
+        null,
+        info.tier,
+      );
+      return res.status(200).json({
+        success: true,
+        token: upToken,
+        licenseType: "lifetime",
+        tier: info.tier,
+        licenseCode: up.licenseCode,
+        expiresAt: null,
+      });
     }
 
     // ── ساخت لایسنس + ثبت idempotency، هر دو در یک تراکنش ─────────────
@@ -2417,6 +2704,276 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
     });
   } catch (err) {
     console.error("خطا در تایید خرید گوگل پلی:", err);
+    return res
+      .status(500)
+      .json({ success: false, code: "SERVER_ERROR", error: "Server error" });
+  }
+});
+
+// ── چک دوره‌ای استرداد وجه هواوی (غیرفعال به‌صورت پیش‌فرض) ──────────────────
+// با env HUAWEI_REVALIDATE_HOURS (مثلاً 24) فعال می‌شه. مثل گوگل پلی: fail-open
+// (هر خطای شبکه/API یعنی «معتبر»). فقط وقتی هواوی صریحاً purchaseState=1 (لغو)
+// یا 2 (استرداد) بده، لایسنس revoked می‌شه.
+// ⚠️ قبل از روشن کردن در تولید، رفتار هواوی برای یک خرید تستیِ مسترد‌شده رو امتحان کن.
+const HUAWEI_REVALIDATE_MS =
+  (Number(process.env.HUAWEI_REVALIDATE_HOURS) || 0) * 60 * 60 * 1000;
+
+async function isHuaweiPurchaseRevoked(licenseRef, data) {
+  if (data.revoked === true) return true;
+  if (!HUAWEI_REVALIDATE_MS || !HUAWEI_IAP_CLIENT_ID) return false;
+  if (!data.huawei_purchase_token || !data.huawei_product_id) return false;
+
+  const lastMs = data.huawei_verified_at
+    ? data.huawei_verified_at.toMillis()
+    : data.activated_at
+      ? data.activated_at.toMillis()
+      : 0;
+  if (Date.now() - lastMs < HUAWEI_REVALIDATE_MS) return false;
+
+  try {
+    const v = await verifyHuaweiPurchaseToken(
+      data.huawei_product_id,
+      data.huawei_purchase_token,
+    );
+    if (!v.ok) return false; // fail-open
+
+    if (v.data.purchaseState === 1 || v.data.purchaseState === 2) {
+      await licenseRef.update({
+        revoked: true,
+        revokedAt: admin.firestore.FieldValue.serverTimestamp(),
+        revokeReason: `huawei purchaseState=${v.data.purchaseState}`,
+      });
+      return true;
+    }
+    await licenseRef
+      .update({
+        huawei_verified_at: admin.firestore.FieldValue.serverTimestamp(),
+      })
+      .catch(() => {});
+    return false;
+  } catch (err) {
+    console.error("هواوی: خطا در بازبینی دوره‌ای خرید:", err);
+    return false; // fail-open
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  تایید خرید هواوی → ساخت خودکار و فعال‌سازی فوری لایسنس
+// ════════════════════════════════════════════════════════════════════════
+// همون الگوی /googleplay/verify-purchase بالا، با این فرق‌ها:
+//   ۱) صحت‌سنجی با Huawei Order Service API (verifyHuaweiPurchaseToken).
+//      این تماس server-to-server مرجع نهاییه؛ فیلدهای inAppPurchaseData و
+//      inAppDataSignature که کلاینت می‌فرسته فقط برای لاگ/دیباگ‌ان و برای
+//      تصمیم‌گیری استفاده نمی‌شن (چیزی که کلاینت می‌گه قابل اعتماد نیست).
+//   ۲) محصول Non-consumable است → acknowledge/consume وجود نداره.
+//   ۳) توکن‌های هواوی طولانی‌ان → docId کالکشن، هش SHA-256 توکنه
+//      (huaweiPurchaseDocId)، و توکن واقعی توی فیلدهای سند ذخیره می‌شه.
+//   ۴) fingerprint دستگاه خریدار از developerPayload خود خرید (که کلاینت موقع
+//      خرید گذاشته) خونده می‌شه.
+// ساختار پاسخ دقیقاً مثل /activate و /googleplay/verify-purchase.
+app.post("/huawei/verify-purchase", async (req, res) => {
+  try {
+    const {
+      purchaseToken,
+      productId,
+      fingerprint,
+      appId,
+      hardwareSignature,
+      appGeneration,
+    } = req.body;
+
+    if (!purchaseToken || !productId || !fingerprint || !appId) {
+      return res.status(400).json({
+        success: false,
+        code: "MISSING_FIELDS",
+        error: "purchaseToken, productId, fingerprint and appId are required",
+      });
+    }
+
+    if (!isValidAppId(appId)) {
+      return res
+        .status(400)
+        .json({ success: false, code: "UNKNOWN_APP", error: "Unknown appId" });
+    }
+
+    const info = HUAWEI_SKU_LICENSE_MAP[productId];
+    if (!info) {
+      console.error(`هواوی: productId ناشناخته (${productId})`);
+      return res.status(400).json({
+        success: false,
+        code: "UNKNOWN_PRODUCT",
+        error: "Unknown product",
+      });
+    }
+
+    // ── idempotency + انتقال لایسنس (retry، یا بازیابی روی دستگاه جدید) ──
+    const tokenId = huaweiPurchaseDocId(purchaseToken);
+    const purchaseRef = db.collection("huaweiPurchases").doc(tokenId);
+    const huaweiExtraFields = (prev) => ({
+      huawei_product_id: prev.productId,
+      huawei_purchase_token: purchaseToken,
+      huawei_verified_at: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    const bindArgs = {
+      collectionName: "huaweiPurchases",
+      source: "huawei",
+      extraLicenseFields: huaweiExtraFields,
+      purchaseToken: tokenId, // bindExistingStorePurchase فقط ازش به‌عنوان docId استفاده می‌کنه
+      fingerprint,
+      appId,
+      hardwareSignature,
+      appGeneration,
+    };
+    const existing = await bindExistingStorePurchase(bindArgs);
+    if (existing.status !== "missing") {
+      return sendStoreBindResult(res, existing);
+    }
+
+    // ── صحت‌سنجی با Huawei Order Service API (server-to-server) ─────────
+    let verified;
+    try {
+      verified = await verifyHuaweiPurchaseToken(productId, purchaseToken);
+    } catch (err) {
+      console.error("هواوی: خطا در اتصال به verify API:", err);
+      return res.status(502).json({
+        success: false,
+        code: "HUAWEI_UNREACHABLE",
+        error: "Could not reach Huawei",
+      });
+    }
+    if (!verified.ok) {
+      if (verified.definitive) {
+        return res.status(403).json({
+          success: false,
+          code: "PURCHASE_NOT_FOUND",
+          error: "Huawei could not confirm this purchase.",
+        });
+      }
+      return res.status(502).json({
+        success: false,
+        code: "HUAWEI_VERIFY_FAILED",
+        error: "Could not verify the purchase with Huawei right now.",
+      });
+    }
+
+    const pd = verified.data;
+
+    // purchaseState: -1 = اولیه، 0 = خریداری‌شده، 1 = لغوشده، 2 = استردادشده
+    if (pd.purchaseState !== 0) {
+      return res.status(403).json({
+        success: false,
+        code: "PURCHASE_NOT_COMPLETED",
+        error: "Purchase not completed",
+      });
+    }
+    if (pd.productId && pd.productId !== productId) {
+      console.error(
+        `هواوی: productId پاسخ (${pd.productId}) با درخواست (${productId}) فرق دارد`,
+      );
+      return res.status(403).json({
+        success: false,
+        code: "PURCHASE_NOT_COMPLETED",
+        error: "Purchase not completed",
+      });
+    }
+    if (pd.packageName && pd.packageName !== appId) {
+      console.warn(
+        `هواوی: packageName خرید (${pd.packageName}) با appId درخواست (${appId}) فرق دارد`,
+      );
+    }
+    // purchaseType === 0 یعنی خرید سندباکس/تستی (در تولید این فیلد نمیاد)
+    if (pd.purchaseType === 0) {
+      console.log("هواوی: این یک خرید تستی (sandbox) است.");
+    }
+
+    // fingerprint دستگاه خریدار (developerPayload). عمداً «اجباری» نیست: بعد از
+    // factory reset یا دستگاه جدید fingerprint عوض می‌شه و خریدار واقعی نباید
+    // قفل بشه. فقط ثبت می‌شه و عدم تطابق لاگ می‌شه.
+    const originFingerprint = pd.developerPayload || null;
+    if (originFingerprint && originFingerprint !== fingerprint) {
+      console.warn(
+        `هواوی: fingerprint خرید با دستگاه درخواست‌دهنده فرق دارد (token=${tokenId.slice(0, 8)}…)`,
+      );
+    }
+
+    // ── ساخت لایسنس + ثبت idempotency، هر دو در یک تراکنش ─────────────
+    const licenseCode = generateLicenseCode();
+    const tier = info.tier;
+    const licenseType = info.license_type;
+
+    let lostRace = false;
+    await db.runTransaction(async (tx) => {
+      lostRace = false;
+      const again = await tx.get(purchaseRef);
+      if (again.exists) {
+        lostRace = true;
+        return;
+      }
+
+      tx.set(db.collection("licenses").doc(licenseCode), {
+        tier,
+        license_type: licenseType,
+        appGeneration: info.appGeneration || CURRENT_APP_GENERATION,
+        is_shared: false,
+        is_used: true,
+        fingerprint,
+        appId,
+        hardwareSignature: hardwareSignature || null,
+        source: "huawei",
+        huawei_product_id: productId,
+        huawei_purchase_token: purchaseToken,
+        huawei_order_id: pd.orderId || null,
+        huawei_verified_at: admin.firestore.FieldValue.serverTimestamp(),
+        activated_at: admin.firestore.FieldValue.serverTimestamp(),
+        expires_at: null, // فقط lifetime می‌فروشیم
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      tx.set(purchaseRef, {
+        productId,
+        fingerprint,
+        originFingerprint,
+        appId,
+        licenseCode,
+        licenseType,
+        tier,
+        orderId: pd.orderId || null,
+        processedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+
+    if (lostRace) {
+      const raced = await bindExistingStorePurchase(bindArgs);
+      return sendStoreBindResult(res, raced);
+    }
+
+    await linkDevice(
+      fingerprint,
+      appId,
+      licenseType,
+      licenseCode,
+      appGeneration,
+    );
+
+    const token = createSignedToken(
+      fingerprint,
+      appId,
+      licenseCode,
+      licenseType,
+      null,
+      tier,
+    );
+
+    return res.status(200).json({
+      success: true,
+      token,
+      licenseType,
+      tier,
+      licenseCode,
+      expiresAt: null,
+    });
+  } catch (err) {
+    console.error("خطا در تایید خرید هواوی:", err);
     return res
       .status(500)
       .json({ success: false, code: "SERVER_ERROR", error: "Server error" });
@@ -2986,6 +3543,13 @@ app.post("/signin", async (req, res) => {
       ) {
         continue;
       }
+      if (
+        !data.is_shared &&
+        data.source === "huawei" &&
+        (await isHuaweiPurchaseRevoked(licenseDoc.ref, data))
+      ) {
+        continue;
+      }
 
       // ── ارتقای خودکار probation → lifetime (فاصله‌ی غیرعادیِ expires_at) ──
       // فقط برای لایسنس‌های اختصاصی (نه تریال مشترک ۵روزه)، و فقط وقتی
@@ -3504,6 +4068,45 @@ app.post("/admin/mark-paid", requireAdmin, async (req, res) => {
 });
 
 // ── مشاهده‌ی وضعیت فعلی ورژن/آپدیت یک اپ (فقط ادمین) ─────────────────────
+// ── تغییر دستیِ سطح (tier) یک لایسنس — مثلاً ارتقای دستی/پشتیبانی/تریال ────
+// body: { licenseCode, tier: "mini" | "tools" | "pro" }
+// چون /signin و /activate هر بار tier رو از سند لایسنس می‌خونن و توی توکن
+// امضاشده می‌ذارن، کاربر دفعه‌ی بعدی که اپ رو باز کنه (signIn) سطح جدید رو می‌گیره.
+app.post("/admin/set-tier", requireAdmin, async (req, res) => {
+  try {
+    const rawCode = req.body?.licenseCode;
+    const tier = normalizeTier(req.body?.tier);
+    if (!rawCode || typeof rawCode !== "string" || !tier) {
+      return res.status(400).json({
+        status: "error",
+        error: "licenseCode و tier (mini | tools | pro) الزامی است",
+      });
+    }
+    const licenseCode = rawCode.trim().toUpperCase();
+    const ref = db.collection("licenses").doc(licenseCode);
+    const doc = await ref.get();
+    if (!doc.exists) {
+      return res
+        .status(404)
+        .json({ status: "error", error: "کد لایسنس پیدا نشد" });
+    }
+    await ref.update({
+      tier,
+      tierChangedBy: "admin",
+      tierChangedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    return res.status(200).json({
+      status: "ok",
+      licenseCode,
+      tier,
+      previousTier: resolveTier(doc.data()),
+    });
+  } catch (err) {
+    console.error("خطا در set-tier:", err);
+    return res.status(500).json({ status: "error", error: "Server error" });
+  }
+});
+
 app.get("/admin/version-info/:appId", requireAdmin, async (req, res) => {
   try {
     const versionDoc = await getVersionDoc(req.params.appId);
