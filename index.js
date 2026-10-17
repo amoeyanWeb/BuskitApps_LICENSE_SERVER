@@ -760,7 +760,15 @@ function createSignedToken(
 const TIERS = ["mini", "tools", "pro"];
 const TIER_RANK = { mini: 1, tools: 2, pro: 3 };
 // مقادیر قدیمی (از زمانی که bronze/silver/gold داشتی) به سطح جدید نگاشت می‌شن.
-const LEGACY_TIER_ALIASES = { bronze: "mini", silver: "tools", gold: "pro" };
+const LEGACY_TIER_ALIASES = {
+  bronze: "mini",
+  silver: "tools",
+  gold: "pro",
+  // شناسه‌ی محصول‌های Google Play (SKU) — اگه دستی/دسته‌ای توی فیلد tier نوشته شدن
+  buskit_mini: "mini",
+  buskit_tools: "tools",
+  buskit_pro: "pro",
+};
 
 function normalizeTier(raw) {
   if (typeof raw !== "string") return null;
