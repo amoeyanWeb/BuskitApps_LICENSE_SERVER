@@ -475,9 +475,7 @@ async function getHuaweiAccessToken(forceRefresh = false) {
     return huaweiTokenCache.accessToken;
   }
   if (!HUAWEI_IAP_CLIENT_ID || !HUAWEI_IAP_CLIENT_SECRET) {
-    throw new Error(
-      "HUAWEI_IAP_CLIENT_ID / HUAWEI_IAP_CLIENT_SECRET تنظیم نشده",
-    );
+    throw new Error("HUAWEI_IAP_CLIENT_ID / HUAWEI_IAP_CLIENT_SECRET تنظیم نشده");
   }
   const body = new URLSearchParams({
     grant_type: "client_credentials",
@@ -506,10 +504,7 @@ async function getHuaweiAccessToken(forceRefresh = false) {
 // شناسه‌ی سند Firestore برای یک purchaseToken هواوی. توکن‌های هواوی طولانی‌ان و
 // ممکنه کاراکتر ناجور داشته باشن؛ هش SHA-256 یک docId امن و یکتا می‌ده.
 function huaweiPurchaseDocId(purchaseToken) {
-  return crypto
-    .createHash("sha256")
-    .update(String(purchaseToken))
-    .digest("hex");
+  return crypto.createHash("sha256").update(String(purchaseToken)).digest("hex");
 }
 
 // POST {order-url}/applications/purchases/tokens/verify
@@ -710,10 +705,11 @@ const AUTO_LIFETIME_GAP_MS = 90 * 24 * 60 * 60 * 1000; // ۳ ماه
 // لایسنس/دستگاه روی سرور هست و هم packageName ای که به Google Play Developer
 // API داده می‌شه. com.BuskitApp.Tools هم برای بقیه‌ی اپ‌ها مثل قبل کار می‌کنه.
 const ALLOWED_APP_IDS = [
-  "com.BuskitApp.Tools", // مایکت قبلی
-  "com.BuskitTools", // برای گوگل پلی و مایکت
-  "com.BuskitToolsV2", //برای ورژن دو
-  "com,BuskiApps", // applicationId جدید گوگل پلی (تک اپ برای هر سه سطح)
+  "com.BuskitApp.Tools",
+  "com.BuskitTools",
+  "com.BuskitToolsV2",
+  "buskittools.lifetime", // applicationId جدید گوگل پلی (تک اپ برای هر سه سطح)
+  "com.BuskitApps", // applicationId فعلی اپ (build.gradle)
 ];
 
 // ── fingerprint رو برای Firestore document ID ایمن کن ────────────────────
@@ -934,38 +930,21 @@ const MYKET_SKU_LICENSE_MAP = {
 const GOOGLE_PLAY_SKU_LICENSE_MAP = {
   // ── خرید مستقیم هر سطح (لایسنس جدید می‌سازه) ──────────────────────────
   buskit_mini: { tier: "mini", license_type: "lifetime", appGeneration: "v1" },
-  buskit_tools: {
-    tier: "tools",
-    license_type: "lifetime",
-    appGeneration: "v1",
-  },
+  buskit_tools: { tier: "tools", license_type: "lifetime", appGeneration: "v1" },
   buskit_pro: { tier: "pro", license_type: "lifetime", appGeneration: "v1" },
   // ── محصول قدیمی تک‌سطحی: خریدارهای قبلی = PRO (grandfathering) ─────────
-  buskit_lifetime: {
-    tier: "pro",
-    license_type: "lifetime",
-    appGeneration: "v1",
-  },
+  buskit_lifetime: { tier: "pro", license_type: "lifetime", appGeneration: "v1" },
   // ── محصول‌های «ارتقا» (قیمت = اختلاف دو سطح). لایسنس جدید نمی‌سازن؛ سطحِ
   //    همون لایسنسِ فعلیِ دستگاه رو بالا می‌برن. upgradeFrom = سطحی که کاربر
   //    باید همین الان داشته باشه. ─────────────────────────────────────────
   buskit_up_mini_tools: {
-    tier: "tools",
-    upgradeFrom: "mini",
-    license_type: "lifetime",
-    appGeneration: "v1",
+    tier: "tools", upgradeFrom: "mini", license_type: "lifetime", appGeneration: "v1",
   },
   buskit_up_mini_pro: {
-    tier: "pro",
-    upgradeFrom: "mini",
-    license_type: "lifetime",
-    appGeneration: "v1",
+    tier: "pro", upgradeFrom: "mini", license_type: "lifetime", appGeneration: "v1",
   },
   buskit_up_tools_pro: {
-    tier: "pro",
-    upgradeFrom: "tools",
-    license_type: "lifetime",
-    appGeneration: "v1",
+    tier: "pro", upgradeFrom: "tools", license_type: "lifetime", appGeneration: "v1",
   },
 };
 
@@ -3318,14 +3297,16 @@ app.post("/activate", async (req, res) => {
         licenseCode,
         appGeneration,
       );
-      return res.status(200).json({
-        success: true,
-        token,
-        licenseType,
-        tier,
-        licenseCode,
-        expiresAt,
-      });
+      return res
+        .status(200)
+        .json({
+          success: true,
+          token,
+          licenseType,
+          tier,
+          licenseCode,
+          expiresAt,
+        });
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -3832,22 +3813,28 @@ app.post("/admin/announce-version", requireAdmin, async (req, res) => {
         .json({ status: "error", error: "Invalid version number" });
     }
     if (versionType !== "free" && versionType !== "paid") {
-      return res.status(400).json({
-        status: "error",
-        error: "versionType must be 'free' or 'paid'",
-      });
+      return res
+        .status(400)
+        .json({
+          status: "error",
+          error: "versionType must be 'free' or 'paid'",
+        });
     }
     if (versionType === "free" && !versionDownloadUrl) {
-      return res.status(400).json({
-        status: "error",
-        error: "versionDownloadUrl is required for a free version",
-      });
+      return res
+        .status(400)
+        .json({
+          status: "error",
+          error: "versionDownloadUrl is required for a free version",
+        });
     }
     if (versionType === "paid" && !versionPurchaseUrl) {
-      return res.status(400).json({
-        status: "error",
-        error: "versionPurchaseUrl is required for a paid version",
-      });
+      return res
+        .status(400)
+        .json({
+          status: "error",
+          error: "versionPurchaseUrl is required for a paid version",
+        });
     }
 
     await db
@@ -3902,22 +3889,28 @@ app.post("/admin/announce-update", requireAdmin, async (req, res) => {
         .json({ status: "error", error: "Invalid update number" });
     }
     if (updateType !== "free" && updateType !== "paid") {
-      return res.status(400).json({
-        status: "error",
-        error: "updateType must be 'free' or 'paid'",
-      });
+      return res
+        .status(400)
+        .json({
+          status: "error",
+          error: "updateType must be 'free' or 'paid'",
+        });
     }
     if (updateType === "free" && !updateDownloadUrl) {
-      return res.status(400).json({
-        status: "error",
-        error: "updateDownloadUrl is required for a free update",
-      });
+      return res
+        .status(400)
+        .json({
+          status: "error",
+          error: "updateDownloadUrl is required for a free update",
+        });
     }
     if (updateType === "paid" && !updatePurchaseUrl) {
-      return res.status(400).json({
-        status: "error",
-        error: "updatePurchaseUrl is required for a paid update",
-      });
+      return res
+        .status(400)
+        .json({
+          status: "error",
+          error: "updatePurchaseUrl is required for a paid update",
+        });
     }
 
     const ref = db.collection("appVersions").doc(appId);
