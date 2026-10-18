@@ -3530,10 +3530,51 @@ app.post("/signin", async (req, res) => {
 
     const links = deviceDoc.data().links || {};
 
-    for (const durationType of DURATION_ORDER) {
-      const licenseCode = links[durationType];
-      if (!licenseCode) continue;
+    // ── اولویت لایسنس‌ها: اگه این دستگاه چند لایسنس معتبر داره، فقط «قوی‌ترین»
+    // حساب می‌شه: Gold(pro) > Silver(tools) > Bronze(mini) > رایگان ۵روزه > probation.
+    // فقط links.lifetime (یک کد) کافی نیست؛ چون با چند خرید/اکانت ممکنه چند
+    // لایسنس مادام‌العمر به همین دستگاه گره خورده باشه و لینک فقط آخری رو نگه داره.
+    // پس همه‌ی لایسنس‌های lifetime که روی همین fingerprint+appId فعالن رو
+    // می‌خونیم و بر اساس tier مرتب می‌کنیم. اگه یکی‌شون رد شد (revoked/…)،
+    // نوبت بعدی‌ه، و در نهایت تریال.
+    const candidates = []; // { durationType, licenseCode }
+    try {
+      const seen = new Set();
+      const lifetimeList = [];
+      const lifeSnap = await db
+        .collection("licenses")
+        .where("fingerprint", "==", fingerprint)
+        .where("appId", "==", appId)
+        .where("is_used", "==", true)
+        .get();
+      lifeSnap.forEach((d) => {
+        const ld = d.data();
+        if (ld.is_shared === true) return;
+        if ((ld.license_type ?? "lifetime") !== "lifetime") return;
+        lifetimeList.push({ code: d.id, rank: TIER_RANK[resolveTier(ld)] || 0 });
+        seen.add(d.id);
+      });
+      // لینک قدیمیِ دستگاه هم اگه توی نتیجه نبود (مثلاً سندهای قدیمی) حفظ بشه
+      if (links.lifetime && !seen.has(links.lifetime)) {
+        lifetimeList.push({ code: links.lifetime, rank: 0 });
+      }
+      lifetimeList.sort((a, b) => b.rank - a.rank);
+      for (const l of lifetimeList) {
+        candidates.push({ durationType: "lifetime", licenseCode: l.code });
+      }
+    } catch (candErr) {
+      // خطای کوئری نباید ورود کاربر رو خراب کنه → فال‌بک به رفتار قبلی
+      console.error("signin: خطا در خواندن لایسنس‌های دستگاه:", candErr);
+      if (links.lifetime) {
+        candidates.push({ durationType: "lifetime", licenseCode: links.lifetime });
+      }
+    }
+    for (const dt of DURATION_ORDER) {
+      if (dt === "lifetime") continue;
+      if (links[dt]) candidates.push({ durationType: dt, licenseCode: links[dt] });
+    }
 
+    for (const { durationType, licenseCode } of candidates) {
       const licenseDoc = await db.collection("licenses").doc(licenseCode).get();
       if (!licenseDoc.exists) continue;
 
@@ -3643,6 +3684,20 @@ app.post("/signin", async (req, res) => {
           licenseCode,
           versionInfo,
         });
+      }
+
+      // لایسنس انتخاب‌شده «قوی‌ترین» ـه؛ اگه لینک دستگاه به چیز دیگه‌ای اشاره
+      // می‌کرد اصلاحش کن (ارتقا هم روی همین لایسنس اعمال می‌شه، نه یک لایسنس ضعیف‌تر)
+      if (effectiveDurationType === "lifetime" && links.lifetime !== licenseCode) {
+        deviceRef
+          .set(
+            {
+              links: { lifetime: licenseCode },
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            },
+            { merge: true },
+          )
+          .catch(() => {});
       }
 
       const token = createSignedToken(
