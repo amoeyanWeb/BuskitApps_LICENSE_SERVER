@@ -2180,8 +2180,24 @@ async function bindExistingStorePurchase({
     };
 
     if (!licenseSnap.exists) {
+      // سند لایسنس نیست (پاک شده) → از روی سندهای خرید دوباره ساخته می‌شه.
+      // ⚠️ سطح درست = «بالاترین» سطحِ بین همه‌ی خریدهای وصل به همین لایسنس
+      // (مثلاً خرید پایه‌ی mini + ارتقای pro). قبلاً فقط سطح همین یک خرید
+      // (mini) می‌نشست و چون خرید ارتقا بعدش لایسنس رو «موجود» می‌دید، سطح
+      // هیچ‌وقت به pro برنمی‌گشت.
+      let bestTier = normalizeTier(prev.tier) || "pro";
+      const siblings = await tx.get(
+        db
+          .collection(collectionName)
+          .where("licenseCode", "==", prev.licenseCode),
+      );
+      siblings.forEach((d) => {
+        const t = normalizeTier(d.data().tier);
+        if (t && TIER_RANK[t] > TIER_RANK[bestTier]) bestTier = t;
+      });
+      liveTier = bestTier;
       tx.set(licenseRef, {
-        tier: prev.tier,
+        tier: bestTier,
         license_type: prev.licenseType,
         appGeneration: appGeneration || CURRENT_APP_GENERATION,
         is_shared: false,
@@ -4121,6 +4137,80 @@ app.post("/admin/set-tier", requireAdmin, async (req, res) => {
     });
   } catch (err) {
     console.error("خطا در set-tier:", err);
+    return res.status(500).json({ status: "error", error: "Server error" });
+  }
+});
+
+// ── پاک‌سازی کامل یک لایسنس (فقط ادمین) ────────────────────────────────
+// برای تست: اگه فقط سند licenses رو دستی پاک کنی، سندهای خرید
+// (googlePlayPurchases / ...) و لینک دستگاه (devices) می‌مونن و سرور موقع
+// Restore لایسنس رو از روی اون‌ها دوباره می‌سازه. این مسیر هر سه رو با هم
+// پاک می‌کنه تا دیتابیس ناسازگار نشه.
+// body: { licenseCode }
+// ⚠️ خرید خودِ Google Play پاک نمی‌شه؛ برای خرید دوباره باید توی Play
+// Console ریفاندش کنی.
+app.post("/admin/purge-license", requireAdmin, async (req, res) => {
+  try {
+    const rawCode = req.body?.licenseCode;
+    if (!rawCode || typeof rawCode !== "string") {
+      return res
+        .status(400)
+        .json({ status: "error", error: "licenseCode الزامی است" });
+    }
+    const licenseCode = rawCode.trim().toUpperCase();
+    const licRef = db.collection("licenses").doc(licenseCode);
+    const licSnap = await licRef.get();
+
+    if (licSnap.exists && licSnap.data().is_shared === true) {
+      return res.status(400).json({
+        status: "error",
+        error: "لایسنس مشترک/تریال با این مسیر پاک نمی‌شه",
+      });
+    }
+    const licenseType = licSnap.exists
+      ? licSnap.data().license_type ?? "lifetime"
+      : "lifetime";
+
+    const result = { license: 0, purchases: 0, devices: 0 };
+
+    // ۱) همه‌ی سندهای خرید وصل به این لایسنس (همه‌ی فروشگاه‌ها)
+    for (const col of [
+      "googlePlayPurchases",
+      "myketPurchases",
+      "huaweiPurchases",
+      "bazaarPurchases",
+    ]) {
+      const snap = await db
+        .collection(col)
+        .where("licenseCode", "==", licenseCode)
+        .get();
+      for (const d of snap.docs) {
+        await d.ref.delete();
+        result.purchases++;
+      }
+    }
+
+    // ۲) لینک دستگاه‌هایی که به این لایسنس اشاره می‌کنن
+    const devSnap = await db
+      .collection("devices")
+      .where(`links.${licenseType}`, "==", licenseCode)
+      .get();
+    for (const d of devSnap.docs) {
+      await d.ref.update({
+        [`links.${licenseType}`]: admin.firestore.FieldValue.delete(),
+      });
+      result.devices++;
+    }
+
+    // ۳) خودِ لایسنس
+    if (licSnap.exists) {
+      await licRef.delete();
+      result.license = 1;
+    }
+
+    return res.status(200).json({ status: "ok", licenseCode, ...result });
+  } catch (err) {
+    console.error("خطا در purge-license:", err);
     return res.status(500).json({ status: "error", error: "Server error" });
   }
 });
