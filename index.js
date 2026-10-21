@@ -923,10 +923,21 @@ const LS_VARIANT_LICENSE_MAP = {
 // مایکت ساختی (و همون چیزی که کلاینت در MYKET_SKU_LIFETIME می‌فرسته).
 // عمداً سمت سرور نگه داشته می‌شه، نه چیزی که از body درخواست خونده بشه.
 const MYKET_SKU_LICENSE_MAP = {
-  buskit_lifetime: {
-    tier: "pro",
-    license_type: "lifetime",
-    appGeneration: "v1",
+  // ── خرید مستقیم هر سطح (لایسنس جدید می‌سازه) ──────────────────────────
+  buskit_mini: { tier: "mini", license_type: "lifetime", appGeneration: "v1" },
+  buskit_tools: { tier: "tools", license_type: "lifetime", appGeneration: "v1" },
+  buskit_pro: { tier: "pro", license_type: "lifetime", appGeneration: "v1" },
+  // ── محصول قدیمی تک‌سطحی: خریدارهای قبلی = PRO (grandfathering) ─────────
+  buskit_lifetime: { tier: "pro", license_type: "lifetime", appGeneration: "v1" },
+  // ── محصول‌های «ارتقا» (لایسنس جدید نمی‌سازن؛ tier لایسنس فعلی رو بالا می‌برن) ──
+  buskit_up_mini_tools: {
+    tier: "tools", upgradeFrom: "mini", license_type: "lifetime", appGeneration: "v1",
+  },
+  buskit_up_mini_pro: {
+    tier: "pro", upgradeFrom: "mini", license_type: "lifetime", appGeneration: "v1",
+  },
+  buskit_up_tools_pro: {
+    tier: "pro", upgradeFrom: "tools", license_type: "lifetime", appGeneration: "v1",
   },
 };
 
@@ -1974,46 +1985,59 @@ app.post("/myket/verify-purchase", async (req, res) => {
     if (!purchaseToken || !skuId || !fingerprint || !appId) {
       return res.status(400).json({
         success: false,
+        code: "MISSING_FIELDS",
         error: "purchaseToken, skuId, fingerprint and appId are required",
       });
     }
 
     if (!isValidAppId(appId)) {
-      return res.status(400).json({ success: false, error: "Unknown appId" });
+      return res
+        .status(400)
+        .json({ success: false, code: "UNKNOWN_APP", error: "Unknown appId" });
     }
 
     const info = MYKET_SKU_LICENSE_MAP[skuId];
     if (!info) {
       console.error(`مایکت: skuId ناشناخته (${skuId})`);
-      return res.status(400).json({ success: false, error: "Unknown product" });
+      return res.status(400).json({
+        success: false,
+        code: "UNKNOWN_PRODUCT",
+        error: "Unknown product",
+      });
     }
 
     if (!MYKET_ACCESS_TOKEN) {
       console.error("مایکت: متغیر محیطی MYKET_ACCESS_TOKEN تنظیم نشده");
-      return res
-        .status(500)
-        .json({ success: false, error: "Server misconfigured" });
+      return res.status(500).json({
+        success: false,
+        code: "SERVER_ERROR",
+        error: "Server misconfigured",
+      });
     }
 
-    // ── idempotency + انتقال لایسنس: این purchaseToken قبلاً پردازش شده؟ ──
-    // (retry بعد از timeout، یا بازیابی روی دستگاه جدید بعد از Log out)
+    // ── idempotency + انتقال لایسنس (همان کمک‌کننده‌ی مشترکِ گوگل پلی/بازار) ──
+    // سطحِ «فعلی» لایسنس هم برمی‌گرده (اگه کاربر بعداً ارتقا داده باشه).
     const purchaseRef = db.collection("myketPurchases").doc(purchaseToken);
-    const existing = await bindExistingMyketPurchase({
+    const bindArgs = {
+      collectionName: "myketPurchases",
+      source: "myket",
+      extraLicenseFields: (prev) => ({
+        myket_sku_id: prev.skuId,
+        myket_purchase_token: purchaseToken,
+        myket_verified_at: admin.firestore.FieldValue.serverTimestamp(),
+      }),
       purchaseToken,
       fingerprint,
       appId,
       hardwareSignature,
       appGeneration,
-    });
+    };
+    const existing = await bindExistingStorePurchase(bindArgs);
     if (existing.status !== "missing") {
-      return sendMyketBindResult(res, existing);
+      return sendStoreBindResult(res, existing);
     }
 
     // ── صحت‌سنجی خرید با سرور مایکت (server-to-server) ───────────────
-    // طبق مستندات رسمی و به‌روز مایکت (myket.ir/kb/pages/server-to-server-payment-validation-api):
-    // POST با body شامل tokenId — نسخه‌ی قدیمی/انگلیسی مستندات که قبلاً بهش
-    // استناد شده بود (GET .../tokens/{TOKEN}) منسوخ بوده؛ این همون فرمتیه که
-    // از اول اینجا بود.
     let myketData;
     try {
       const verifyUrl = `https://developer.myket.ir/api/partners/applications/${encodeURIComponent(
@@ -2026,27 +2050,97 @@ app.post("/myket/verify-purchase", async (req, res) => {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ tokenId: purchaseToken }),
+        signal: AbortSignal.timeout(15000),
       });
       myketData = await myketRes.json();
       if (!myketRes.ok) {
         console.error("مایکت: خطای verify API:", myketData);
         return res.status(502).json({
           success: false,
+          code: "MYKET_VERIFY_FAILED",
           error: myketData?.translatedMessage || "Purchase verification failed",
         });
       }
     } catch (err) {
       console.error("مایکت: خطا در اتصال به verify API:", err);
-      return res
-        .status(502)
-        .json({ success: false, error: "Could not reach Myket" });
+      return res.status(502).json({
+        success: false,
+        code: "MYKET_UNREACHABLE",
+        error: "Could not reach Myket",
+      });
     }
 
     // طبق مستندات مایکت: purchaseState === 0 یعنی خرید موفق
     if (myketData.purchaseState !== 0) {
-      return res
-        .status(403)
-        .json({ success: false, error: "Purchase not successful" });
+      return res.status(403).json({
+        success: false,
+        code: "PURCHASE_NOT_COMPLETED",
+        error: "Purchase not successful",
+      });
+    }
+
+    // ── محصول «ارتقا»: سطح لایسنس فعلیِ همین دستگاه رو بالا ببر ─────────
+    if (info.upgradeFrom) {
+      let up = null;
+      await db.runTransaction(async (tx) => {
+        up = null;
+        const again = await tx.get(purchaseRef);
+        if (again.exists) {
+          up = { status: "race" };
+          return;
+        }
+        const ev = await evaluateUpgrade(fingerprint, appId, info, tx);
+        if (!ev.ok) {
+          up = { status: "rejected", code: ev.code };
+          return;
+        }
+        tx.update(ev.licRef, {
+          tier: info.tier,
+          tierUpgradedFrom: ev.curTier,
+          tierUpgradedAt: admin.firestore.FieldValue.serverTimestamp(),
+          tierHistory: admin.firestore.FieldValue.arrayUnion({
+            from: ev.curTier,
+            to: info.tier,
+            productId: skuId,
+            at: Date.now(),
+          }),
+        });
+        tx.set(purchaseRef, {
+          skuId,
+          fingerprint,
+          appId,
+          licenseCode: ev.licenseCode,
+          licenseType: "lifetime",
+          tier: info.tier,
+          isUpgrade: true,
+          upgradeFrom: ev.curTier,
+          processedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        up = { status: "ok", licenseCode: ev.licenseCode };
+      });
+
+      if (up.status === "race") {
+        const raced = await bindExistingStorePurchase(bindArgs);
+        return sendStoreBindResult(res, raced);
+      }
+      if (up.status === "rejected") return sendUpgradeRejected(res, up.code);
+
+      const upToken = createSignedToken(
+        fingerprint,
+        appId,
+        up.licenseCode,
+        "lifetime",
+        null,
+        info.tier,
+      );
+      return res.status(200).json({
+        success: true,
+        token: upToken,
+        licenseType: "lifetime",
+        tier: info.tier,
+        licenseCode: up.licenseCode,
+        expiresAt: null,
+      });
     }
 
     // ── ساخت لایسنس + ثبت idempotency، هر دو در یک تراکنش ─────────────
@@ -2057,8 +2151,6 @@ app.post("/myket/verify-purchase", async (req, res) => {
     let lostRace = false;
     await db.runTransaction(async (tx) => {
       lostRace = false;
-      // درخواست هم‌زمان دیگه‌ای (مثلاً retry کلاینت) ممکنه همین توکن رو
-      // همین الان ثبت کرده باشه؛ داخل تراکنش دوباره چک می‌کنیم.
       const again = await tx.get(purchaseRef);
       if (again.exists) {
         lostRace = true;
@@ -2094,23 +2186,11 @@ app.post("/myket/verify-purchase", async (req, res) => {
     });
 
     if (lostRace) {
-      const raced = await bindExistingMyketPurchase({
-        purchaseToken,
-        fingerprint,
-        appId,
-        hardwareSignature,
-        appGeneration,
-      });
-      return sendMyketBindResult(res, raced);
+      const raced = await bindExistingStorePurchase(bindArgs);
+      return sendStoreBindResult(res, raced);
     }
 
-    await linkDevice(
-      fingerprint,
-      appId,
-      licenseType,
-      licenseCode,
-      appGeneration,
-    );
+    await linkDevice(fingerprint, appId, licenseType, licenseCode, appGeneration);
 
     const token = createSignedToken(
       fingerprint,
@@ -2131,7 +2211,9 @@ app.post("/myket/verify-purchase", async (req, res) => {
     });
   } catch (err) {
     console.error("خطا در تایید خرید مایکت:", err);
-    return res.status(500).json({ success: false, error: "Server error" });
+    return res
+      .status(500)
+      .json({ success: false, code: "SERVER_ERROR", error: "Server error" });
   }
 });
 
