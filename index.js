@@ -710,6 +710,7 @@ const ALLOWED_APP_IDS = [
   "com.BuskitToolsV2",
   "buskittools.lifetime", // applicationId جدید گوگل پلی (تک اپ برای هر سه سطح)
   "com.BuskitApps", // applicationId فعلی اپ (build.gradle)
+  "com.Buskitapps", // applicationId واقعی اپ در build.gradle و پنل مایکت (حروف کوچک a)
 ];
 
 // ── fingerprint رو برای Firestore document ID ایمن کن ────────────────────
