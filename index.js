@@ -642,131 +642,6 @@ const DEVICE_KEY_MISMATCH_MSG =
 const OFFLINE_GRACE_MS =
   (Number(process.env.OFFLINE_GRACE_HOURS) || 48) * 60 * 60 * 1000;
 
-// ════════════════════════════════════════════════════════════════════════
-//  Play Integrity — اثبات اینکه درخواست از «اپ اصلی و دست‌نخورده» روی یک
-//  «دستگاه واقعی و گواهی‌شده» اومده (مترونوم)
-// ════════════════════════════════════════════════════════════════════════
-// کلید Keystore فقط وقتی معنی داره که از یک گوشی واقعی اومده باشه، نه یک
-// امولاتور یا اپ patch‌شده که کلید نرم‌افزاری می‌سازه. اپ موقع فعال‌سازی یک
-// توکن Play Integrity می‌گیره که nonce‌اش هش (challenge|appId|fingerprint|
-// action|publicKey) هست؛ یعنی خودِ کلید عمومیِ ثبت‌شده داخل توکن «مهر» می‌شه.
-// سرور توکن رو از طریق API گوگل رمزگشایی و چک می‌کنه:
-//   • requestPackageName == appId و nonce درست و تازه
-//   • اپ: PLAY_RECOGNIZED (اپ دست‌نخورده از پلی) یا امضای APK توی
-//     PLAY_INTEGRITY_ALLOWED_CERTS (برای بیلدهای خارج از پلی)
-//   • دستگاه: MEETS_DEVICE_INTEGRITY (یا MEETS_STRONG_INTEGRITY اگه
-//     PLAY_INTEGRITY_REQUIRE_STRONG=true)
-// env ها:
-//   PLAY_INTEGRITY_MODE = off (پیش‌فرض) | report (فقط لاگ) | enforce (اعمال)
-//   PLAY_INTEGRITY_ALLOWED_CERTS = digestهای base64url امضای APK، با کاما
-//   PLAY_INTEGRITY_RECHECK_DAYS = هر چند روز یک‌بار در /signin دوباره چک بشه (پیش‌فرض ۷)
-//   PLAY_INTEGRITY_REQUIRE_STRONG = true/false
-// سرویس‌اکانت همون GOOGLE_PLAY_SERVICE_ACCOUNT استفاده می‌شه (باید توی پروژه‌ی
-// Cloud که به اپ لینک شده، API «Play Integrity» فعال باشه).
-const PLAY_INTEGRITY_MODE = (process.env.PLAY_INTEGRITY_MODE || "off").toLowerCase();
-const PLAY_INTEGRITY_ALLOWED_CERTS = (process.env.PLAY_INTEGRITY_ALLOWED_CERTS || "")
-  .split(",")
-  .map((x) => x.trim())
-  .filter(Boolean);
-const PLAY_INTEGRITY_RECHECK_MS =
-  (Number(process.env.PLAY_INTEGRITY_RECHECK_DAYS) || 7) * 24 * 60 * 60 * 1000;
-const PLAY_INTEGRITY_REQUIRE_STRONG =
-  process.env.PLAY_INTEGRITY_REQUIRE_STRONG === "true";
-const playIntegrityAuth = GOOGLE_PLAY_SERVICE_ACCOUNT
-  ? new GoogleAuth({
-      credentials: GOOGLE_PLAY_SERVICE_ACCOUNT,
-      scopes: ["https://www.googleapis.com/auth/playintegrity"],
-    })
-  : null;
-
-function integrityNonce({ challenge, appId, fingerprint, action, publicKey }) {
-  return crypto
-    .createHash("sha256")
-    .update(`${challenge}|${appId}|${fingerprint}|${action}|${publicKey}`)
-    .digest("base64url");
-}
-
-// خروجی: { ok, reason, transient }  — transient یعنی خطای موقتِ ما/گوگل (نه ردّ قطعی)
-async function checkPlayIntegrity({ appId, fingerprint, action, publicKey, challenge, token }) {
-  if (!token || typeof token !== "string") {
-    return { ok: false, reason: "missing-token" };
-  }
-  if (!playIntegrityAuth) {
-    return { ok: false, reason: "not-configured", transient: true };
-  }
-  let payload;
-  try {
-    const client = await playIntegrityAuth.getClient();
-    const { token: accessToken } = await client.getAccessToken();
-    const r = await fetch(
-      `https://playintegrity.googleapis.com/v1/${encodeURIComponent(appId)}:decodeIntegrityToken`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ integrity_token: token }),
-        signal: AbortSignal.timeout(15000),
-      },
-    );
-    const j = await r.json().catch(() => null);
-    if (!r.ok || !j || !j.tokenPayloadExternal) {
-      // توکن خراب/جعلی (۴xx) ردّ قطعیه؛ ۵xx و مشکلات دسترسی موقتی حساب می‌شن
-      return {
-        ok: false,
-        reason: `decode-failed-${r.status}`,
-        transient: r.status >= 500 || r.status === 401 || r.status === 403 || r.status === 429,
-      };
-    }
-    payload = j.tokenPayloadExternal;
-  } catch (e) {
-    return { ok: false, reason: `error:${e.message}`, transient: true };
-  }
-
-  const rd = payload.requestDetails || {};
-  if (rd.requestPackageName !== appId) return { ok: false, reason: "package-mismatch", payload };
-  if (rd.nonce !== integrityNonce({ challenge, appId, fingerprint, action, publicKey })) {
-    return { ok: false, reason: "nonce-mismatch", payload };
-  }
-  const age = Date.now() - Number(rd.timestampMillis);
-  if (!Number.isFinite(age) || age < -60_000 || age > 10 * 60 * 1000) {
-    return { ok: false, reason: "token-stale", payload };
-  }
-
-  const app = payload.appIntegrity || {};
-  const recognized = app.appRecognitionVerdict === "PLAY_RECOGNIZED";
-  const certOk =
-    app.packageName === appId &&
-    (app.certificateSha256Digest || []).some((d) => PLAY_INTEGRITY_ALLOWED_CERTS.includes(d));
-  if (!recognized && !certOk) return { ok: false, reason: "app-not-recognized", payload };
-
-  const verdicts = (payload.deviceIntegrity || {}).deviceRecognitionVerdict || [];
-  const needed = PLAY_INTEGRITY_REQUIRE_STRONG ? "MEETS_STRONG_INTEGRITY" : "MEETS_DEVICE_INTEGRITY";
-  if (!verdicts.includes(needed)) return { ok: false, reason: `device-not-${needed}`, payload };
-
-  return { ok: true, payload };
-}
-
-// خروجی: { pass, verified, transient, reason }
-//   pass     → اجازه‌ی ادامه (در حالت report همیشه true)
-//   verified → واقعاً توکن معتبر بود (برای ثبت integrityVerifiedAt)
-async function enforceIntegrity(args) {
-  if (PLAY_INTEGRITY_MODE === "off") return { pass: true, verified: false };
-  const r = await checkPlayIntegrity(args);
-  if (r.ok) return { pass: true, verified: true };
-  console.warn(
-    `PlayIntegrity[${PLAY_INTEGRITY_MODE}] ${args.action} رد شد: ${r.reason}`,
-    r.payload ? JSON.stringify(r.payload) : "",
-  );
-  return {
-    pass: PLAY_INTEGRITY_MODE !== "enforce",
-    verified: false,
-    transient: !!r.transient,
-    reason: r.reason,
-  };
-}
-
 // دریافت challenge (هر appId معتبر می‌تونه بگیره)
 app.post("/challenge", (req, res) => {
   const appId = req.body && req.body.appId;
@@ -3244,32 +3119,6 @@ app.post("/activate", async (req, res) => {
       return res.status(400).json(DEVICE_PROOF_ERR);
     }
 
-    // ── مترونوم: Play Integrity (اپ دست‌نخورده روی دستگاه گواهی‌شده) ───────
-    let integrityStamp = {};
-    if (needsKey) {
-      const ig = await enforceIntegrity({
-        appId,
-        fingerprint,
-        action: "activate",
-        publicKey: clientPublicKey,
-        challenge: req.body.challenge,
-        token: req.body.integrityToken,
-      });
-      if (!ig.pass) {
-        return res.status(ig.transient ? 503 : 403).json({
-          error: ig.transient
-            ? "Could not verify this device right now. Try again later."
-            : "This device or app version could not be verified (Google Play Integrity).",
-          code: ig.transient ? "INTEGRITY_UNAVAILABLE" : "INTEGRITY_FAILED",
-        });
-      }
-      if (ig.verified) {
-        integrityStamp = {
-          integrityVerifiedAt: admin.firestore.FieldValue.serverTimestamp(),
-        };
-      }
-    }
-
     // ── نرمال‌سازی کد لایسنس به حروف بزرگ ──────────────────────────
     const licenseCode = rawLicenseCode.trim().toUpperCase();
 
@@ -3369,7 +3218,6 @@ app.post("/activate", async (req, res) => {
         fingerprint,
         appId,
         ...(needsKey ? { devicePublicKey: clientPublicKey } : {}),
-        ...integrityStamp,
         hardwareSignature: hardwareSignature || null,
         activated_at: admin.firestore.FieldValue.serverTimestamp(),
         expires_at: expiresAtFirestore,
@@ -3489,7 +3337,6 @@ app.post("/activate", async (req, res) => {
           fingerprint,
           appId,
           ...(needsKey ? { devicePublicKey: clientPublicKey } : {}),
-          ...integrityStamp,
           license_type: licenseType,
           activated_at: admin.firestore.FieldValue.serverTimestamp(),
           expires_at: expiresAtFirestore,
@@ -3725,36 +3572,6 @@ app.post("/signin", async (req, res) => {
           await holderRef
             .update({ devicePublicKey: clientPublicKey })
             .catch((e) => console.error("signin: ثبت کلید دستگاه ناموفق:", e));
-        }
-
-        // ── Play Integrity: اگه از آخرین تایید بیشتر از RECHECK گذشته، اپ باید
-        //    دوباره توکن بده (اپ همون درخواست امضاشده رو با integrityToken تکرار می‌کنه)
-        if (PLAY_INTEGRITY_MODE === "enforce") {
-          const last =
-            holderData.integrityVerifiedAt && holderData.integrityVerifiedAt.toMillis
-              ? holderData.integrityVerifiedAt.toMillis()
-              : 0;
-          if (Date.now() - last > PLAY_INTEGRITY_RECHECK_MS) {
-            if (!req.body.integrityToken) {
-              return res.status(200).json({ status: "integrity_required", versionInfo });
-            }
-            const ig = await enforceIntegrity({
-              appId,
-              fingerprint,
-              action: "signin",
-              publicKey: clientPublicKey,
-              challenge: req.body.challenge,
-              token: req.body.integrityToken,
-            });
-            if (!ig.pass) {
-              return res.status(200).json({ status: "integrity_failed", versionInfo });
-            }
-            if (ig.verified) {
-              holderRef
-                .update({ integrityVerifiedAt: admin.firestore.FieldValue.serverTimestamp() })
-                .catch((e) => console.error("signin: ثبت integrityVerifiedAt ناموفق:", e));
-            }
-          }
         }
       }
 
