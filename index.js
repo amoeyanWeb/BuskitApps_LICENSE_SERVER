@@ -10,7 +10,6 @@ const serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT);
 admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 const db = admin.firestore();
 
-
 // ── کلید خصوصی ───────────────────────────────────────────────────────────
 const privateKey = process.env.PRIVATE_KEY.replace(/\\n/g, "\n");
 
@@ -88,7 +87,9 @@ async function getHuaweiAccessToken(forceRefresh = false) {
     return huaweiTokenCache.accessToken;
   }
   if (!HUAWEI_IAP_CLIENT_ID || !HUAWEI_IAP_CLIENT_SECRET) {
-    throw new Error("HUAWEI_IAP_CLIENT_ID / HUAWEI_IAP_CLIENT_SECRET تنظیم نشده");
+    throw new Error(
+      "HUAWEI_IAP_CLIENT_ID / HUAWEI_IAP_CLIENT_SECRET تنظیم نشده",
+    );
   }
   const body = new URLSearchParams({
     grant_type: "client_credentials",
@@ -117,7 +118,10 @@ async function getHuaweiAccessToken(forceRefresh = false) {
 // شناسه‌ی سند Firestore برای یک purchaseToken هواوی. توکن‌های هواوی طولانی‌ان و
 // ممکنه کاراکتر ناجور داشته باشن؛ هش SHA-256 یک docId امن و یکتا می‌ده.
 function huaweiPurchaseDocId(purchaseToken) {
-  return crypto.createHash("sha256").update(String(purchaseToken)).digest("hex");
+  return crypto
+    .createHash("sha256")
+    .update(String(purchaseToken))
+    .digest("hex");
 }
 
 // POST {order-url}/applications/purchases/tokens/verify
@@ -323,6 +327,7 @@ const ALLOWED_APP_IDS = [
   "com.BuskitToolsV2",
   "buskittools.lifetime", // applicationId جدید گوگل پلی (تک اپ برای هر سه سطح)
   "com.BuskitApps", // applicationId فعلی اپ (build.gradle)
+  "com.buskit.metronome", // اپ مترونوم (MetroPro): applicationId داخل build.gradle.kts. قبل از انتشار در گوگل‌پلی عوضش کن و مقدار جدید رو هم اینجا اضافه کن
   "com.Buskitapps", // applicationId واقعی اپ در build.gradle و پنل مایکت (حروف کوچک a)
 ];
 
@@ -539,19 +544,36 @@ const LS_VARIANT_LICENSE_MAP = {
 const MYKET_SKU_LICENSE_MAP = {
   // ── خرید مستقیم هر سطح (لایسنس جدید می‌سازه) ──────────────────────────
   buskit_mini: { tier: "mini", license_type: "lifetime", appGeneration: "v1" },
-  buskit_tools: { tier: "tools", license_type: "lifetime", appGeneration: "v1" },
+  buskit_tools: {
+    tier: "tools",
+    license_type: "lifetime",
+    appGeneration: "v1",
+  },
   buskit_pro: { tier: "pro", license_type: "lifetime", appGeneration: "v1" },
   // ── محصول قدیمی تک‌سطحی: خریدارهای قبلی = PRO (grandfathering) ─────────
-  buskit_lifetime: { tier: "pro", license_type: "lifetime", appGeneration: "v1" },
+  buskit_lifetime: {
+    tier: "pro",
+    license_type: "lifetime",
+    appGeneration: "v1",
+  },
   // ── محصول‌های «ارتقا» (لایسنس جدید نمی‌سازن؛ tier لایسنس فعلی رو بالا می‌برن) ──
   buskit_up_mini_tools: {
-    tier: "tools", upgradeFrom: "mini", license_type: "lifetime", appGeneration: "v1",
+    tier: "tools",
+    upgradeFrom: "mini",
+    license_type: "lifetime",
+    appGeneration: "v1",
   },
   buskit_up_mini_pro: {
-    tier: "pro", upgradeFrom: "mini", license_type: "lifetime", appGeneration: "v1",
+    tier: "pro",
+    upgradeFrom: "mini",
+    license_type: "lifetime",
+    appGeneration: "v1",
   },
   buskit_up_tools_pro: {
-    tier: "pro", upgradeFrom: "tools", license_type: "lifetime", appGeneration: "v1",
+    tier: "pro",
+    upgradeFrom: "tools",
+    license_type: "lifetime",
+    appGeneration: "v1",
   },
 };
 
@@ -563,21 +585,38 @@ const MYKET_SKU_LICENSE_MAP = {
 const GOOGLE_PLAY_SKU_LICENSE_MAP = {
   // ── خرید مستقیم هر سطح (لایسنس جدید می‌سازه) ──────────────────────────
   buskit_mini: { tier: "mini", license_type: "lifetime", appGeneration: "v1" },
-  buskit_tools: { tier: "tools", license_type: "lifetime", appGeneration: "v1" },
+  buskit_tools: {
+    tier: "tools",
+    license_type: "lifetime",
+    appGeneration: "v1",
+  },
   buskit_pro: { tier: "pro", license_type: "lifetime", appGeneration: "v1" },
   // ── محصول قدیمی تک‌سطحی: خریدارهای قبلی = PRO (grandfathering) ─────────
-  buskit_lifetime: { tier: "pro", license_type: "lifetime", appGeneration: "v1" },
+  buskit_lifetime: {
+    tier: "pro",
+    license_type: "lifetime",
+    appGeneration: "v1",
+  },
   // ── محصول‌های «ارتقا» (قیمت = اختلاف دو سطح). لایسنس جدید نمی‌سازن؛ سطحِ
   //    همون لایسنسِ فعلیِ دستگاه رو بالا می‌برن. upgradeFrom = سطحی که کاربر
   //    باید همین الان داشته باشه. ─────────────────────────────────────────
   buskit_up_mini_tools: {
-    tier: "tools", upgradeFrom: "mini", license_type: "lifetime", appGeneration: "v1",
+    tier: "tools",
+    upgradeFrom: "mini",
+    license_type: "lifetime",
+    appGeneration: "v1",
   },
   buskit_up_mini_pro: {
-    tier: "pro", upgradeFrom: "mini", license_type: "lifetime", appGeneration: "v1",
+    tier: "pro",
+    upgradeFrom: "mini",
+    license_type: "lifetime",
+    appGeneration: "v1",
   },
   buskit_up_tools_pro: {
-    tier: "pro", upgradeFrom: "tools", license_type: "lifetime", appGeneration: "v1",
+    tier: "pro",
+    upgradeFrom: "tools",
+    license_type: "lifetime",
+    appGeneration: "v1",
   },
 };
 
@@ -1804,7 +1843,13 @@ app.post("/myket/verify-purchase", async (req, res) => {
       return sendStoreBindResult(res, raced);
     }
 
-    await linkDevice(fingerprint, appId, licenseType, licenseCode, appGeneration);
+    await linkDevice(
+      fingerprint,
+      appId,
+      licenseType,
+      licenseCode,
+      appGeneration,
+    );
 
     const token = createSignedToken(
       fingerprint,
@@ -3026,16 +3071,14 @@ app.post("/activate", async (req, res) => {
         licenseCode,
         appGeneration,
       );
-      return res
-        .status(200)
-        .json({
-          success: true,
-          token,
-          licenseType,
-          tier,
-          licenseCode,
-          expiresAt,
-        });
+      return res.status(200).json({
+        success: true,
+        token,
+        licenseType,
+        tier,
+        licenseCode,
+        expiresAt,
+      });
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -3247,7 +3290,10 @@ app.post("/signin", async (req, res) => {
         const ld = d.data();
         if (ld.is_shared === true) return;
         if ((ld.license_type ?? "lifetime") !== "lifetime") return;
-        lifetimeList.push({ code: d.id, rank: TIER_RANK[resolveTier(ld)] || 0 });
+        lifetimeList.push({
+          code: d.id,
+          rank: TIER_RANK[resolveTier(ld)] || 0,
+        });
         seen.add(d.id);
       });
       // لینک قدیمیِ دستگاه هم اگه توی نتیجه نبود (مثلاً سندهای قدیمی) حفظ بشه
@@ -3262,12 +3308,16 @@ app.post("/signin", async (req, res) => {
       // خطای کوئری نباید ورود کاربر رو خراب کنه → فال‌بک به رفتار قبلی
       console.error("signin: خطا در خواندن لایسنس‌های دستگاه:", candErr);
       if (links.lifetime) {
-        candidates.push({ durationType: "lifetime", licenseCode: links.lifetime });
+        candidates.push({
+          durationType: "lifetime",
+          licenseCode: links.lifetime,
+        });
       }
     }
     for (const dt of DURATION_ORDER) {
       if (dt === "lifetime") continue;
-      if (links[dt]) candidates.push({ durationType: dt, licenseCode: links[dt] });
+      if (links[dt])
+        candidates.push({ durationType: dt, licenseCode: links[dt] });
     }
 
     for (const { durationType, licenseCode } of candidates) {
@@ -3384,7 +3434,10 @@ app.post("/signin", async (req, res) => {
 
       // لایسنس انتخاب‌شده «قوی‌ترین» ـه؛ اگه لینک دستگاه به چیز دیگه‌ای اشاره
       // می‌کرد اصلاحش کن (ارتقا هم روی همین لایسنس اعمال می‌شه، نه یک لایسنس ضعیف‌تر)
-      if (effectiveDurationType === "lifetime" && links.lifetime !== licenseCode) {
+      if (
+        effectiveDurationType === "lifetime" &&
+        links.lifetime !== licenseCode
+      ) {
         deviceRef
           .set(
             {
@@ -3597,28 +3650,22 @@ app.post("/admin/announce-version", requireAdmin, async (req, res) => {
         .json({ status: "error", error: "Invalid version number" });
     }
     if (versionType !== "free" && versionType !== "paid") {
-      return res
-        .status(400)
-        .json({
-          status: "error",
-          error: "versionType must be 'free' or 'paid'",
-        });
+      return res.status(400).json({
+        status: "error",
+        error: "versionType must be 'free' or 'paid'",
+      });
     }
     if (versionType === "free" && !versionDownloadUrl) {
-      return res
-        .status(400)
-        .json({
-          status: "error",
-          error: "versionDownloadUrl is required for a free version",
-        });
+      return res.status(400).json({
+        status: "error",
+        error: "versionDownloadUrl is required for a free version",
+      });
     }
     if (versionType === "paid" && !versionPurchaseUrl) {
-      return res
-        .status(400)
-        .json({
-          status: "error",
-          error: "versionPurchaseUrl is required for a paid version",
-        });
+      return res.status(400).json({
+        status: "error",
+        error: "versionPurchaseUrl is required for a paid version",
+      });
     }
 
     await db
@@ -3673,28 +3720,22 @@ app.post("/admin/announce-update", requireAdmin, async (req, res) => {
         .json({ status: "error", error: "Invalid update number" });
     }
     if (updateType !== "free" && updateType !== "paid") {
-      return res
-        .status(400)
-        .json({
-          status: "error",
-          error: "updateType must be 'free' or 'paid'",
-        });
+      return res.status(400).json({
+        status: "error",
+        error: "updateType must be 'free' or 'paid'",
+      });
     }
     if (updateType === "free" && !updateDownloadUrl) {
-      return res
-        .status(400)
-        .json({
-          status: "error",
-          error: "updateDownloadUrl is required for a free update",
-        });
+      return res.status(400).json({
+        status: "error",
+        error: "updateDownloadUrl is required for a free update",
+      });
     }
     if (updateType === "paid" && !updatePurchaseUrl) {
-      return res
-        .status(400)
-        .json({
-          status: "error",
-          error: "updatePurchaseUrl is required for a paid update",
-        });
+      return res.status(400).json({
+        status: "error",
+        error: "updatePurchaseUrl is required for a paid update",
+      });
     }
 
     const ref = db.collection("appVersions").doc(appId);
@@ -3919,7 +3960,7 @@ app.post("/admin/purge-license", requireAdmin, async (req, res) => {
       });
     }
     const licenseType = licSnap.exists
-      ? licSnap.data().license_type ?? "lifetime"
+      ? (licSnap.data().license_type ?? "lifetime")
       : "lifetime";
 
     const result = { license: 0, purchases: 0, devices: 0 };
