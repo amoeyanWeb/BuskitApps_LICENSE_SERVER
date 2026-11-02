@@ -517,14 +517,14 @@ function isValidAppId(appId) {
 // ════════════════════════════════════════════════════════════════════════
 //  کالکشن جداگانه‌ی لایسنس‌های اپ مترونوم (MetroPro)
 // ════════════════════════════════════════════════════════════════════════
-// لایسنس‌های مترونوم توی کالکشن «metronome_Licenses» نگه داشته می‌شن، نه
+// لایسنس‌های مترونوم توی کالکشن «metonome_Licenses» نگه داشته می‌شن، نه
 // «licenses» (که مال BuskitTools و بقیه‌ی اپ‌هاست). ساختار سند دقیقاً مثل
 // licenses هست (docId = خود کد لایسنس). انتخاب کالکشن فقط بر اساس appId
 // درخواست انجام می‌شه. اگه applicationId مترونوم عوض شد، همین‌جا اضافه‌ش کن.
-// ⚠️ اسم کالکشن عمداً همون چیزیه که خواستی (metronome، بدون r)؛ اگه بعداً
+// ⚠️ اسم کالکشن عمداً همون چیزیه که خواستی (metonome، بدون r)؛ اگه بعداً
 // خواستی اصلاحش کنی فقط همین یک ثابت رو عوض کن.
 const METRONOME_APP_IDS = new Set(["com.buskit.metronome"]);
-const METRONOME_LICENSES_COLLECTION = "metronome_Licenses";
+const METRONOME_LICENSES_COLLECTION = "metonome_Licenses";
 
 function licensesCol(appId) {
   return db.collection(
@@ -533,7 +533,7 @@ function licensesCol(appId) {
 }
 
 // برای مسیرهای ادمین که فقط licenseCode می‌گیرن (appId اختیاری): اگه appId
-// بیاد همون تعیین‌کننده‌ست، وگرنه اول licenses و بعد metronome_Licenses چک می‌شه.
+// بیاد همون تعیین‌کننده‌ست، وگرنه اول licenses و بعد metonome_Licenses چک می‌شه.
 async function resolveLicenseRef(licenseCode, appId) {
   if (appId) return licensesCol(appId).doc(licenseCode);
   const main = db.collection("licenses").doc(licenseCode);
@@ -544,7 +544,7 @@ async function resolveLicenseRef(licenseCode, appId) {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  قفل سخت‌افزاری دستگاه (Android Keystore) — فقط برای اپ مترونوم
+//  قفل سخت‌افزاری دستگاه (Android Keystore) — مترونوم (اجباری) و BuskitTools (اختیاری→اجباری)
 // ════════════════════════════════════════════════════════════════════════
 // fingerprint (ANDROID_ID + مدل) رو کلاینت می‌فرسته و قابل کپی/جعله. برای
 // مترونوم، هر دستگاه یک جفت‌کلید EC (P-256) داخل Android Keystore می‌سازه که
@@ -558,8 +558,54 @@ async function resolveLicenseRef(licenseCode, appId) {
 //     به همون کلید گره می‌خورن (migration).
 const CHALLENGE_TTL_MS = 5 * 60 * 1000;
 
+// حالت قفل کلید دستگاه برای هر اپ:
+//   "required" → مترونوم: بدون اثبات کلید هیچ‌کاری قبول نمی‌شه
+//   "optional" → BuskitTools: نسخه‌های قدیمیِ منتشرشده هنوز کلید نمی‌فرستن، پس
+//                درخواستِ بدون اثبات فقط برای لایسنسی که هنوز به کلیدی گره نخورده
+//                قبول می‌شه (نسخه‌ی قدیمی همچنان کار می‌کنه). اما اگه اثبات
+//                بیاد، حتماً باید معتبر باشه، و لایسنسِ گره‌خورده به کلید دیگه
+//                «بدون اثبات» قبول نمی‌شه (جلوی downgrade/حذف اثبات رو می‌گیره).
+//                وقتی بیشتر کاربرا آپدیت کردن: DEVICE_KEY_MODE_TOOLS=required
+//   "off"      → هر appId دیگه
+function deviceKeyMode(appId) {
+  if (METRONOME_APP_IDS.has(appId)) return "required";
+  if (isValidAppId(appId)) {
+    return process.env.DEVICE_KEY_MODE_TOOLS === "required" ? "required" : "optional";
+  }
+  return "off";
+}
+
 function requiresDeviceKey(appId) {
-  return METRONOME_APP_IDS.has(appId);
+  return deviceKeyMode(appId) !== "off";
+}
+
+// body درخواست رو بر اساس حالت اپ بررسی می‌کنه.
+//   needsKey: اثبات معتبر داریم (پس مقایسه/ثبت کلید انجام بشه)
+//   invalid : اثبات لازم/ارسال‌شده ولی نامعتبره → 400
+function readDeviceProof(body, appId, fingerprint, action) {
+  const keyMode = deviceKeyMode(appId);
+  if (keyMode === "off") {
+    return { keyMode, needsKey: false, clientPublicKey: null, invalid: false };
+  }
+  const b = body || {};
+  const hasProof = !!(b.publicKey || b.signature || b.challenge);
+  if (!hasProof && keyMode === "optional") {
+    return { keyMode, needsKey: false, clientPublicKey: null, invalid: false };
+  }
+  const ok = verifyDeviceProof({
+    appId,
+    fingerprint,
+    action,
+    publicKey: b.publicKey,
+    challenge: b.challenge,
+    signature: b.signature,
+  });
+  return {
+    keyMode,
+    needsKey: ok,
+    clientPublicKey: ok ? b.publicKey : null,
+    invalid: !ok,
+  };
 }
 
 function createChallenge() {
@@ -589,8 +635,7 @@ function isChallengeValid(challenge) {
 }
 
 function parseDevicePublicKey(publicKeyB64) {
-  if (typeof publicKeyB64 !== "string" || publicKeyB64.length > 400)
-    return null;
+  if (typeof publicKeyB64 !== "string" || publicKeyB64.length > 400) return null;
   try {
     const keyObj = crypto.createPublicKey({
       key: Buffer.from(publicKeyB64, "base64"),
@@ -611,14 +656,7 @@ function parseDevicePublicKey(publicKeyB64) {
 
 // true فقط اگه: کلید عمومی معتبر EC P-256 باشه، challenge ما و تازه باشه،
 // و امضا (SHA256withECDSA، DER) روی پیام درست با همون کلید جور دربیاد.
-function verifyDeviceProof({
-  appId,
-  fingerprint,
-  action,
-  publicKey,
-  challenge,
-  signature,
-}) {
+function verifyDeviceProof({ appId, fingerprint, action, publicKey, challenge, signature }) {
   try {
     const keyObj = parseDevicePublicKey(publicKey);
     if (!keyObj || !isChallengeValid(challenge)) return false;
@@ -658,6 +696,7 @@ app.post("/challenge", (req, res) => {
   }
   return res.status(200).json({ challenge: createChallenge() });
 });
+
 
 // ════════════════════════════════════════════════════════════════════════
 //  کد تخفیف سایت → رزرو لایسنس واقعی (Buskit-Tools purchase form)
@@ -1627,8 +1666,20 @@ async function bindExistingMyketPurchase({
           return { status: "conflict" };
         }
         // همان دستگاه → چیزی برای تغییر نیست
+        // (به‌جز کلید دستگاه: خرید فروشگاهی که استور تأییدش کرده یعنی کاربر
+        //  مالک واقعیه؛ بعد از نصب مجدد/پاک‌شدن دیتا کلید Keystore قدیمی دیگه
+        //  وجود نداره، پس کلید ثبت‌شده پاک می‌شه تا ساین‌این بعدی کلید جدید
+        //  رو ثبت کنه. دستگاه دیگه همچنان با 409 رد می‌شه.)
+        if (lic.devicePublicKey && deviceKeyMode(appId) !== "off") {
+          tx.update(licenseRef, {
+            devicePublicKey: admin.firestore.FieldValue.delete(),
+          });
+        }
       } else {
-        tx.update(licenseRef, binding);
+        tx.update(licenseRef, {
+          ...binding,
+          devicePublicKey: admin.firestore.FieldValue.delete(),
+        });
       }
     }
 
@@ -2103,8 +2154,20 @@ async function bindExistingStorePurchase({
           return { status: "conflict" };
         }
         // همان دستگاه → چیزی برای تغییر نیست
+        // (به‌جز کلید دستگاه: خرید فروشگاهی که استور تأییدش کرده یعنی کاربر
+        //  مالک واقعیه؛ بعد از نصب مجدد/پاک‌شدن دیتا کلید Keystore قدیمی دیگه
+        //  وجود نداره، پس کلید ثبت‌شده پاک می‌شه تا ساین‌این بعدی کلید جدید
+        //  رو ثبت کنه. دستگاه دیگه همچنان با 409 رد می‌شه.)
+        if (lic.devicePublicKey && deviceKeyMode(appId) !== "off") {
+          tx.update(licenseRef, {
+            devicePublicKey: admin.firestore.FieldValue.delete(),
+          });
+        }
       } else {
-        tx.update(licenseRef, binding);
+        tx.update(licenseRef, {
+          ...binding,
+          devicePublicKey: admin.firestore.FieldValue.delete(),
+        });
       }
     }
 
@@ -3110,19 +3173,13 @@ app.post("/activate", async (req, res) => {
     }
 
     // ── مترونوم: اثبات مالکیت کلید سخت‌افزاری دستگاه (Android Keystore) ──
-    const needsKey = requiresDeviceKey(appId);
-    const clientPublicKey = needsKey ? req.body.publicKey : null;
-    if (
-      needsKey &&
-      !verifyDeviceProof({
-        appId,
-        fingerprint,
-        action: "activate",
-        publicKey: clientPublicKey,
-        challenge: req.body.challenge,
-        signature: req.body.signature,
-      })
-    ) {
+    const { keyMode, needsKey, clientPublicKey, invalid } = readDeviceProof(
+      req.body,
+      appId,
+      fingerprint,
+      "activate",
+    );
+    if (invalid) {
       return res.status(400).json(DEVICE_PROOF_ERR);
     }
 
@@ -3176,6 +3233,12 @@ app.post("/activate", async (req, res) => {
           } else {
             await userRef.update({ devicePublicKey: clientPublicKey });
           }
+        } else if (keyMode !== "off" && userData.devicePublicKey) {
+          // رکورد به کلید گره خورده ولی این درخواست اثباتی نداره (اپ قدیمی/دستکاری)
+          return res.status(403).json({
+            error: DEVICE_KEY_MISMATCH_MSG,
+            code: "DEVICE_KEY_MISMATCH",
+          });
         }
 
         if (expiresAt === null || Date.now() <= expiresAt) {
@@ -3302,9 +3365,7 @@ app.post("/activate", async (req, res) => {
             }
             if (needsKey) {
               if (freshData.devicePublicKey) {
-                if (
-                  !sameDeviceKey(freshData.devicePublicKey, clientPublicKey)
-                ) {
+                if (!sameDeviceKey(freshData.devicePublicKey, clientPublicKey)) {
                   throw Object.assign(new Error("key-mismatch"), {
                     isActivateErr: true,
                   });
@@ -3313,6 +3374,10 @@ app.post("/activate", async (req, res) => {
                 // لایسنس قدیمی بدون کلید → همین‌جا به کلید این دستگاه گره می‌خوره
                 tx.update(licenseRef, { devicePublicKey: clientPublicKey });
               }
+            } else if (keyMode !== "off" && freshData.devicePublicKey) {
+              throw Object.assign(new Error("key-mismatch"), {
+                isActivateErr: true,
+              });
             }
             return { expiresAt };
           }
@@ -3445,19 +3510,13 @@ app.post("/signin", async (req, res) => {
     }
 
     // ── مترونوم: اثبات مالکیت کلید سخت‌افزاری دستگاه ───────────────────────
-    const needsKey = requiresDeviceKey(appId);
-    const clientPublicKey = needsKey ? req.body.publicKey : null;
-    if (
-      needsKey &&
-      !verifyDeviceProof({
-        appId,
-        fingerprint,
-        action: "signin",
-        publicKey: clientPublicKey,
-        challenge: req.body.challenge,
-        signature: req.body.signature,
-      })
-    ) {
+    const { keyMode, needsKey, clientPublicKey, invalid } = readDeviceProof(
+      req.body,
+      appId,
+      fingerprint,
+      "signin",
+    );
+    if (invalid) {
       return res.status(400).json(DEVICE_PROOF_ERR);
     }
     let keyMismatch = false;
@@ -3498,11 +3557,7 @@ app.post("/signin", async (req, res) => {
       const seen = new Set();
       const lifetimeList = [];
       const lifeSnap = await db
-        .collection(
-          METRONOME_APP_IDS.has(appId)
-            ? METRONOME_LICENSES_COLLECTION
-            : "licenses",
-        )
+        .collection(METRONOME_APP_IDS.has(appId) ? METRONOME_LICENSES_COLLECTION : "licenses")
         .where("fingerprint", "==", fingerprint)
         .where("appId", "==", appId)
         .where("is_used", "==", true)
@@ -3586,6 +3641,11 @@ app.post("/signin", async (req, res) => {
             .update({ devicePublicKey: clientPublicKey })
             .catch((e) => console.error("signin: ثبت کلید دستگاه ناموفق:", e));
         }
+      } else if (keyMode !== "off" && holderData.devicePublicKey) {
+        // لایسنس به کلید دستگاه گره خورده ولی این درخواست اثباتی نداره
+        // (اپ قدیمی یا کلاینتِ دستکاری‌شده) → رد
+        keyMismatch = true;
+        continue;
       }
 
       // ── لایسنس استردادشده (revoked) یا خرید مایکتِ مسترد‌شده ──────────────
@@ -3710,6 +3770,7 @@ app.post("/signin", async (req, res) => {
 
     return res.status(200).json({
       status: keyMismatch ? "device_key_mismatch" : "signup_required",
+      ...(keyMismatch ? { error: DEVICE_KEY_MISMATCH_MSG } : {}),
       versionInfo,
     });
   } catch (err) {
@@ -3749,19 +3810,13 @@ app.post("/logout", async (req, res) => {
     }
 
     // ── مترونوم: بدون اثبات کلید دستگاه نمی‌شه لایسنس رو آزاد کرد ──────────
-    const needsKey = requiresDeviceKey(appId);
-    const clientPublicKey = needsKey ? req.body.publicKey : null;
-    if (
-      needsKey &&
-      !verifyDeviceProof({
-        appId,
-        fingerprint,
-        action: "logout",
-        publicKey: clientPublicKey,
-        challenge: req.body.challenge,
-        signature: req.body.signature,
-      })
-    ) {
+    const { keyMode, needsKey, clientPublicKey, invalid } = readDeviceProof(
+      req.body,
+      appId,
+      fingerprint,
+      "logout",
+    );
+    if (invalid) {
       return res.status(400).json(DEVICE_PROOF_ERR);
     }
 
@@ -3798,9 +3853,9 @@ app.post("/logout", async (req, res) => {
           .json({ error: "This license is not linked to this device" });
       }
       if (
-        needsKey &&
+        keyMode !== "off" &&
         userDoc.data().devicePublicKey &&
-        !sameDeviceKey(userDoc.data().devicePublicKey, clientPublicKey)
+        (!needsKey || !sameDeviceKey(userDoc.data().devicePublicKey, clientPublicKey))
       ) {
         return res.status(403).json({
           error: DEVICE_KEY_MISMATCH_MSG,
@@ -3832,9 +3887,9 @@ app.post("/logout", async (req, res) => {
             throw Object.assign(new Error("not-owner"), { isLogoutErr: true });
           }
           if (
-            needsKey &&
+            keyMode !== "off" &&
             freshData.devicePublicKey &&
-            !sameDeviceKey(freshData.devicePublicKey, clientPublicKey)
+            (!needsKey || !sameDeviceKey(freshData.devicePublicKey, clientPublicKey))
           ) {
             throw Object.assign(new Error("key-mismatch"), {
               isLogoutErr: true,
