@@ -364,6 +364,8 @@ function createSignedToken(
     tier,
     expiresAt: expiresAt ?? null,
     issuedAt: Date.now(),
+    // حداکثر مدتی که اپ بدون اتصال به سرور اجازه‌ی کار داره (فقط مترونوم)
+    offlineGraceMs: requiresDeviceKey(appId) ? OFFLINE_GRACE_MS : null,
   });
   const sign = crypto.createSign("RSA-SHA256");
   sign.update(payload);
@@ -511,6 +513,269 @@ async function linkDevice(
 function isValidAppId(appId) {
   return typeof appId === "string" && ALLOWED_APP_IDS.includes(appId);
 }
+
+// ════════════════════════════════════════════════════════════════════════
+//  کالکشن جداگانه‌ی لایسنس‌های اپ مترونوم (MetroPro)
+// ════════════════════════════════════════════════════════════════════════
+// لایسنس‌های مترونوم توی کالکشن «metonome_Licenses» نگه داشته می‌شن، نه
+// «licenses» (که مال BuskitTools و بقیه‌ی اپ‌هاست). ساختار سند دقیقاً مثل
+// licenses هست (docId = خود کد لایسنس). انتخاب کالکشن فقط بر اساس appId
+// درخواست انجام می‌شه. اگه applicationId مترونوم عوض شد، همین‌جا اضافه‌ش کن.
+// ⚠️ اسم کالکشن عمداً همون چیزیه که خواستی (metonome، بدون r)؛ اگه بعداً
+// خواستی اصلاحش کنی فقط همین یک ثابت رو عوض کن.
+const METRONOME_APP_IDS = new Set(["com.buskit.metronome"]);
+const METRONOME_LICENSES_COLLECTION = "metonome_Licenses";
+
+function licensesCol(appId) {
+  return db.collection(
+    METRONOME_APP_IDS.has(appId) ? METRONOME_LICENSES_COLLECTION : "licenses",
+  );
+}
+
+// برای مسیرهای ادمین که فقط licenseCode می‌گیرن (appId اختیاری): اگه appId
+// بیاد همون تعیین‌کننده‌ست، وگرنه اول licenses و بعد metonome_Licenses چک می‌شه.
+async function resolveLicenseRef(licenseCode, appId) {
+  if (appId) return licensesCol(appId).doc(licenseCode);
+  const main = db.collection("licenses").doc(licenseCode);
+  if ((await main.get()).exists) return main;
+  const metro = db.collection(METRONOME_LICENSES_COLLECTION).doc(licenseCode);
+  if ((await metro.get()).exists) return metro;
+  return main;
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  قفل سخت‌افزاری دستگاه (Android Keystore) — فقط برای اپ مترونوم
+// ════════════════════════════════════════════════════════════════════════
+// fingerprint (ANDROID_ID + مدل) رو کلاینت می‌فرسته و قابل کپی/جعله. برای
+// مترونوم، هر دستگاه یک جفت‌کلید EC (P-256) داخل Android Keystore می‌سازه که
+// کلید خصوصی‌اش از تراشه بیرون نمی‌آد. موقع فعال‌سازی کلید عمومی روی سند لایسنس
+// (devicePublicKey) ثبت می‌شه و از اون به بعد هر /signin و /logout باید یک
+// challenge سمت‌سرور رو با همون کلید خصوصی امضا کنه.
+//   • challenge بدون ذخیره در دیتابیس ساخته می‌شه: ts.nonce.HMAC (اعتبار ۵ دقیقه).
+//   • پیام امضاشده: challenge|appId|fingerprint|action  (action = activate /
+//     signin / logout → امضای یک عمل برای عمل دیگه قابل استفاده نیست).
+//   • لایسنس‌های قدیمی که کلیدی ندارن، با اولین ساین‌این/فعال‌سازیِ دارای کلید،
+//     به همون کلید گره می‌خورن (migration).
+const CHALLENGE_TTL_MS = 5 * 60 * 1000;
+
+function requiresDeviceKey(appId) {
+  return METRONOME_APP_IDS.has(appId);
+}
+
+function createChallenge() {
+  const ts = Date.now().toString();
+  const nonce = crypto.randomBytes(16).toString("hex");
+  const mac = crypto
+    .createHmac("sha256", privateKey)
+    .update(`${ts}.${nonce}`)
+    .digest("hex");
+  return `${ts}.${nonce}.${mac}`;
+}
+
+function isChallengeValid(challenge) {
+  if (typeof challenge !== "string") return false;
+  const parts = challenge.split(".");
+  if (parts.length !== 3) return false;
+  const [ts, nonce, mac] = parts;
+  const expected = crypto
+    .createHmac("sha256", privateKey)
+    .update(`${ts}.${nonce}`)
+    .digest("hex");
+  const a = Buffer.from(mac, "utf8");
+  const b = Buffer.from(expected, "utf8");
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false;
+  const age = Date.now() - Number(ts);
+  return Number.isFinite(age) && age >= -60_000 && age <= CHALLENGE_TTL_MS;
+}
+
+function parseDevicePublicKey(publicKeyB64) {
+  if (typeof publicKeyB64 !== "string" || publicKeyB64.length > 400) return null;
+  try {
+    const keyObj = crypto.createPublicKey({
+      key: Buffer.from(publicKeyB64, "base64"),
+      format: "der",
+      type: "spki",
+    });
+    if (
+      keyObj.asymmetricKeyType !== "ec" ||
+      keyObj.asymmetricKeyDetails?.namedCurve !== "prime256v1"
+    ) {
+      return null;
+    }
+    return keyObj;
+  } catch (e) {
+    return null;
+  }
+}
+
+// true فقط اگه: کلید عمومی معتبر EC P-256 باشه، challenge ما و تازه باشه،
+// و امضا (SHA256withECDSA، DER) روی پیام درست با همون کلید جور دربیاد.
+function verifyDeviceProof({ appId, fingerprint, action, publicKey, challenge, signature }) {
+  try {
+    const keyObj = parseDevicePublicKey(publicKey);
+    if (!keyObj || !isChallengeValid(challenge)) return false;
+    if (typeof signature !== "string" || !signature) return false;
+    const v = crypto.createVerify("SHA256");
+    v.update(`${challenge}|${appId}|${fingerprint}|${action}`);
+    return v.verify(keyObj, Buffer.from(signature, "base64"));
+  } catch (e) {
+    return false;
+  }
+}
+
+function sameDeviceKey(a, b) {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  return Buffer.from(a, "base64").equals(Buffer.from(b, "base64"));
+}
+
+const DEVICE_PROOF_ERR = {
+  status: "error",
+  code: "DEVICE_PROOF_INVALID",
+  error: "Device key proof is missing or invalid",
+};
+const DEVICE_KEY_MISMATCH_MSG =
+  "This license is bound to a different device key (for example after reinstalling the app). Log out on the original device or contact support.";
+
+// ── محدودیت کار آفلاین (مترونوم) ──────────────────────────────────────────
+// داخل توکن امضاشده می‌ره؛ اپ بعد از این مدت (از آخرین ساین‌این موفق آنلاین)
+// دوباره اینترنت می‌خواد. با env OFFLINE_GRACE_HOURS قابل تغییره.
+const OFFLINE_GRACE_MS =
+  (Number(process.env.OFFLINE_GRACE_HOURS) || 48) * 60 * 60 * 1000;
+
+// ════════════════════════════════════════════════════════════════════════
+//  Play Integrity — اثبات اینکه درخواست از «اپ اصلی و دست‌نخورده» روی یک
+//  «دستگاه واقعی و گواهی‌شده» اومده (مترونوم)
+// ════════════════════════════════════════════════════════════════════════
+// کلید Keystore فقط وقتی معنی داره که از یک گوشی واقعی اومده باشه، نه یک
+// امولاتور یا اپ patch‌شده که کلید نرم‌افزاری می‌سازه. اپ موقع فعال‌سازی یک
+// توکن Play Integrity می‌گیره که nonce‌اش هش (challenge|appId|fingerprint|
+// action|publicKey) هست؛ یعنی خودِ کلید عمومیِ ثبت‌شده داخل توکن «مهر» می‌شه.
+// سرور توکن رو از طریق API گوگل رمزگشایی و چک می‌کنه:
+//   • requestPackageName == appId و nonce درست و تازه
+//   • اپ: PLAY_RECOGNIZED (اپ دست‌نخورده از پلی) یا امضای APK توی
+//     PLAY_INTEGRITY_ALLOWED_CERTS (برای بیلدهای خارج از پلی)
+//   • دستگاه: MEETS_DEVICE_INTEGRITY (یا MEETS_STRONG_INTEGRITY اگه
+//     PLAY_INTEGRITY_REQUIRE_STRONG=true)
+// env ها:
+//   PLAY_INTEGRITY_MODE = off (پیش‌فرض) | report (فقط لاگ) | enforce (اعمال)
+//   PLAY_INTEGRITY_ALLOWED_CERTS = digestهای base64url امضای APK، با کاما
+//   PLAY_INTEGRITY_RECHECK_DAYS = هر چند روز یک‌بار در /signin دوباره چک بشه (پیش‌فرض ۷)
+//   PLAY_INTEGRITY_REQUIRE_STRONG = true/false
+// سرویس‌اکانت همون GOOGLE_PLAY_SERVICE_ACCOUNT استفاده می‌شه (باید توی پروژه‌ی
+// Cloud که به اپ لینک شده، API «Play Integrity» فعال باشه).
+const PLAY_INTEGRITY_MODE = (process.env.PLAY_INTEGRITY_MODE || "off").toLowerCase();
+const PLAY_INTEGRITY_ALLOWED_CERTS = (process.env.PLAY_INTEGRITY_ALLOWED_CERTS || "")
+  .split(",")
+  .map((x) => x.trim())
+  .filter(Boolean);
+const PLAY_INTEGRITY_RECHECK_MS =
+  (Number(process.env.PLAY_INTEGRITY_RECHECK_DAYS) || 7) * 24 * 60 * 60 * 1000;
+const PLAY_INTEGRITY_REQUIRE_STRONG =
+  process.env.PLAY_INTEGRITY_REQUIRE_STRONG === "true";
+const playIntegrityAuth = GOOGLE_PLAY_SERVICE_ACCOUNT
+  ? new GoogleAuth({
+      credentials: GOOGLE_PLAY_SERVICE_ACCOUNT,
+      scopes: ["https://www.googleapis.com/auth/playintegrity"],
+    })
+  : null;
+
+function integrityNonce({ challenge, appId, fingerprint, action, publicKey }) {
+  return crypto
+    .createHash("sha256")
+    .update(`${challenge}|${appId}|${fingerprint}|${action}|${publicKey}`)
+    .digest("base64url");
+}
+
+// خروجی: { ok, reason, transient }  — transient یعنی خطای موقتِ ما/گوگل (نه ردّ قطعی)
+async function checkPlayIntegrity({ appId, fingerprint, action, publicKey, challenge, token }) {
+  if (!token || typeof token !== "string") {
+    return { ok: false, reason: "missing-token" };
+  }
+  if (!playIntegrityAuth) {
+    return { ok: false, reason: "not-configured", transient: true };
+  }
+  let payload;
+  try {
+    const client = await playIntegrityAuth.getClient();
+    const { token: accessToken } = await client.getAccessToken();
+    const r = await fetch(
+      `https://playintegrity.googleapis.com/v1/${encodeURIComponent(appId)}:decodeIntegrityToken`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ integrity_token: token }),
+        signal: AbortSignal.timeout(15000),
+      },
+    );
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j || !j.tokenPayloadExternal) {
+      // توکن خراب/جعلی (۴xx) ردّ قطعیه؛ ۵xx و مشکلات دسترسی موقتی حساب می‌شن
+      return {
+        ok: false,
+        reason: `decode-failed-${r.status}`,
+        transient: r.status >= 500 || r.status === 401 || r.status === 403 || r.status === 429,
+      };
+    }
+    payload = j.tokenPayloadExternal;
+  } catch (e) {
+    return { ok: false, reason: `error:${e.message}`, transient: true };
+  }
+
+  const rd = payload.requestDetails || {};
+  if (rd.requestPackageName !== appId) return { ok: false, reason: "package-mismatch", payload };
+  if (rd.nonce !== integrityNonce({ challenge, appId, fingerprint, action, publicKey })) {
+    return { ok: false, reason: "nonce-mismatch", payload };
+  }
+  const age = Date.now() - Number(rd.timestampMillis);
+  if (!Number.isFinite(age) || age < -60_000 || age > 10 * 60 * 1000) {
+    return { ok: false, reason: "token-stale", payload };
+  }
+
+  const app = payload.appIntegrity || {};
+  const recognized = app.appRecognitionVerdict === "PLAY_RECOGNIZED";
+  const certOk =
+    app.packageName === appId &&
+    (app.certificateSha256Digest || []).some((d) => PLAY_INTEGRITY_ALLOWED_CERTS.includes(d));
+  if (!recognized && !certOk) return { ok: false, reason: "app-not-recognized", payload };
+
+  const verdicts = (payload.deviceIntegrity || {}).deviceRecognitionVerdict || [];
+  const needed = PLAY_INTEGRITY_REQUIRE_STRONG ? "MEETS_STRONG_INTEGRITY" : "MEETS_DEVICE_INTEGRITY";
+  if (!verdicts.includes(needed)) return { ok: false, reason: `device-not-${needed}`, payload };
+
+  return { ok: true, payload };
+}
+
+// خروجی: { pass, verified, transient, reason }
+//   pass     → اجازه‌ی ادامه (در حالت report همیشه true)
+//   verified → واقعاً توکن معتبر بود (برای ثبت integrityVerifiedAt)
+async function enforceIntegrity(args) {
+  if (PLAY_INTEGRITY_MODE === "off") return { pass: true, verified: false };
+  const r = await checkPlayIntegrity(args);
+  if (r.ok) return { pass: true, verified: true };
+  console.warn(
+    `PlayIntegrity[${PLAY_INTEGRITY_MODE}] ${args.action} رد شد: ${r.reason}`,
+    r.payload ? JSON.stringify(r.payload) : "",
+  );
+  return {
+    pass: PLAY_INTEGRITY_MODE !== "enforce",
+    verified: false,
+    transient: !!r.transient,
+    reason: r.reason,
+  };
+}
+
+// دریافت challenge (هر appId معتبر می‌تونه بگیره)
+app.post("/challenge", (req, res) => {
+  const appId = req.body && req.body.appId;
+  if (!isValidAppId(appId)) {
+    return res.status(400).json({ error: "Unknown appId" });
+  }
+  return res.status(200).json({ challenge: createChallenge() });
+});
+
 
 // ════════════════════════════════════════════════════════════════════════
 //  کد تخفیف سایت → رزرو لایسنس واقعی (Buskit-Tools purchase form)
@@ -1447,7 +1712,7 @@ async function bindExistingMyketPurchase({
     const prev = purchaseSnap.data();
     if (prev.appId !== appId) return { status: "conflict" };
 
-    const licenseRef = db.collection("licenses").doc(prev.licenseCode);
+    const licenseRef = licensesCol(appId).doc(prev.licenseCode);
     const licenseSnap = await tx.get(licenseRef);
     const binding = {
       is_used: true,
@@ -1809,7 +2074,7 @@ app.post("/myket/verify-purchase", async (req, res) => {
         lostRace = true;
         return;
       }
-      tx.set(db.collection("licenses").doc(licenseCode), {
+      tx.set(licensesCol(appId).doc(licenseCode), {
         tier,
         license_type: licenseType,
         appGeneration: info.appGeneration || CURRENT_APP_GENERATION,
@@ -1909,7 +2174,7 @@ async function bindExistingStorePurchase({
     // بگیره حتی وقتی با purchaseToken خرید پایه‌ی قدیمی بازیابی می‌کنه.
     let liveTier = prev.tier;
 
-    const licenseRef = db.collection("licenses").doc(prev.licenseCode);
+    const licenseRef = licensesCol(appId).doc(prev.licenseCode);
     const licenseSnap = await tx.get(licenseRef);
     const binding = {
       is_used: true,
@@ -2050,7 +2315,7 @@ async function evaluateUpgrade(fingerprint, appId, info, tx) {
     : null;
   if (!licenseCode) return { ok: false, code: "UPGRADE_REQUIRES_LICENSE" };
 
-  const licRef = db.collection("licenses").doc(licenseCode);
+  const licRef = licensesCol(appId).doc(licenseCode);
   const licSnap = await read(licRef);
   if (!licSnap.exists) return { ok: false, code: "UPGRADE_REQUIRES_LICENSE" };
 
@@ -2417,7 +2682,7 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
         return;
       }
 
-      tx.set(db.collection("licenses").doc(licenseCode), {
+      tx.set(licensesCol(appId).doc(licenseCode), {
         tier,
         license_type: licenseType,
         appGeneration: info.appGeneration || CURRENT_APP_GENERATION,
@@ -2685,7 +2950,7 @@ app.post("/huawei/verify-purchase", async (req, res) => {
         return;
       }
 
-      tx.set(db.collection("licenses").doc(licenseCode), {
+      tx.set(licensesCol(appId).doc(licenseCode), {
         tier,
         license_type: licenseType,
         appGeneration: info.appGeneration || CURRENT_APP_GENERATION,
@@ -2875,7 +3140,7 @@ app.post("/bazaar/verify-purchase", async (req, res) => {
         bazaarLostRace = true;
         return;
       }
-      tx.set(db.collection("licenses").doc(licenseCode), {
+      tx.set(licensesCol(appId).doc(licenseCode), {
         tier,
         license_type: licenseType,
         appGeneration: info.appGeneration || CURRENT_APP_GENERATION,
@@ -2962,10 +3227,53 @@ app.post("/activate", async (req, res) => {
       return res.status(400).json({ error: "Unknown appId" });
     }
 
+    // ── مترونوم: اثبات مالکیت کلید سخت‌افزاری دستگاه (Android Keystore) ──
+    const needsKey = requiresDeviceKey(appId);
+    const clientPublicKey = needsKey ? req.body.publicKey : null;
+    if (
+      needsKey &&
+      !verifyDeviceProof({
+        appId,
+        fingerprint,
+        action: "activate",
+        publicKey: clientPublicKey,
+        challenge: req.body.challenge,
+        signature: req.body.signature,
+      })
+    ) {
+      return res.status(400).json(DEVICE_PROOF_ERR);
+    }
+
+    // ── مترونوم: Play Integrity (اپ دست‌نخورده روی دستگاه گواهی‌شده) ───────
+    let integrityStamp = {};
+    if (needsKey) {
+      const ig = await enforceIntegrity({
+        appId,
+        fingerprint,
+        action: "activate",
+        publicKey: clientPublicKey,
+        challenge: req.body.challenge,
+        token: req.body.integrityToken,
+      });
+      if (!ig.pass) {
+        return res.status(ig.transient ? 503 : 403).json({
+          error: ig.transient
+            ? "Could not verify this device right now. Try again later."
+            : "This device or app version could not be verified (Google Play Integrity).",
+          code: ig.transient ? "INTEGRITY_UNAVAILABLE" : "INTEGRITY_FAILED",
+        });
+      }
+      if (ig.verified) {
+        integrityStamp = {
+          integrityVerifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+        };
+      }
+    }
+
     // ── نرمال‌سازی کد لایسنس به حروف بزرگ ──────────────────────────
     const licenseCode = rawLicenseCode.trim().toUpperCase();
 
-    const licenseRef = db.collection("licenses").doc(licenseCode);
+    const licenseRef = licensesCol(appId).doc(licenseCode);
     const licenseDoc = await licenseRef.get();
 
     if (!licenseDoc.exists) {
@@ -3000,6 +3308,19 @@ app.post("/activate", async (req, res) => {
         const expiresAt = userData.expires_at
           ? userData.expires_at.toMillis()
           : null;
+
+        if (needsKey) {
+          if (userData.devicePublicKey) {
+            if (!sameDeviceKey(userData.devicePublicKey, clientPublicKey)) {
+              return res.status(403).json({
+                error: DEVICE_KEY_MISMATCH_MSG,
+                code: "DEVICE_KEY_MISMATCH",
+              });
+            }
+          } else {
+            await userRef.update({ devicePublicKey: clientPublicKey });
+          }
+        }
 
         if (expiresAt === null || Date.now() <= expiresAt) {
           const token = createSignedToken(
@@ -3047,6 +3368,8 @@ app.post("/activate", async (req, res) => {
       await userRef.set({
         fingerprint,
         appId,
+        ...(needsKey ? { devicePublicKey: clientPublicKey } : {}),
+        ...integrityStamp,
         hardwareSignature: hardwareSignature || null,
         activated_at: admin.firestore.FieldValue.serverTimestamp(),
         expires_at: expiresAtFirestore,
@@ -3122,6 +3445,18 @@ app.post("/activate", async (req, res) => {
                 isActivateErr: true,
               });
             }
+            if (needsKey) {
+              if (freshData.devicePublicKey) {
+                if (!sameDeviceKey(freshData.devicePublicKey, clientPublicKey)) {
+                  throw Object.assign(new Error("key-mismatch"), {
+                    isActivateErr: true,
+                  });
+                }
+              } else {
+                // لایسنس قدیمی بدون کلید → همین‌جا به کلید این دستگاه گره می‌خوره
+                tx.update(licenseRef, { devicePublicKey: clientPublicKey });
+              }
+            }
             return { expiresAt };
           }
           throw Object.assign(new Error("already-activated"), {
@@ -3153,6 +3488,8 @@ app.post("/activate", async (req, res) => {
           is_used: true,
           fingerprint,
           appId,
+          ...(needsKey ? { devicePublicKey: clientPublicKey } : {}),
+          ...integrityStamp,
           license_type: licenseType,
           activated_at: admin.firestore.FieldValue.serverTimestamp(),
           expires_at: expiresAtFirestore,
@@ -3179,6 +3516,12 @@ app.post("/activate", async (req, res) => {
         if (err.message === "probation-used") {
           return res.status(403).json({
             error: "This device has already used its one-time trial license.",
+          });
+        }
+        if (err.message === "key-mismatch") {
+          return res.status(403).json({
+            error: DEVICE_KEY_MISMATCH_MSG,
+            code: "DEVICE_KEY_MISMATCH",
           });
         }
         return res.status(403).json({
@@ -3245,6 +3588,24 @@ app.post("/signin", async (req, res) => {
       return res.status(400).json({ status: "error", error: "Unknown appId" });
     }
 
+    // ── مترونوم: اثبات مالکیت کلید سخت‌افزاری دستگاه ───────────────────────
+    const needsKey = requiresDeviceKey(appId);
+    const clientPublicKey = needsKey ? req.body.publicKey : null;
+    if (
+      needsKey &&
+      !verifyDeviceProof({
+        appId,
+        fingerprint,
+        action: "signin",
+        publicKey: clientPublicKey,
+        challenge: req.body.challenge,
+        signature: req.body.signature,
+      })
+    ) {
+      return res.status(400).json(DEVICE_PROOF_ERR);
+    }
+    let keyMismatch = false;
+
     // ── اعلام ورژن/آپدیت: مستقل از وضعیت لایسنس، همراه هر پاسخ برمی‌گرده ──
     const versionDoc = await getVersionDoc(appId);
     const versionInfo = buildVersionInfo(
@@ -3281,7 +3642,7 @@ app.post("/signin", async (req, res) => {
       const seen = new Set();
       const lifetimeList = [];
       const lifeSnap = await db
-        .collection("licenses")
+        .collection(METRONOME_APP_IDS.has(appId) ? METRONOME_LICENSES_COLLECTION : "licenses")
         .where("fingerprint", "==", fingerprint)
         .where("appId", "==", appId)
         .where("is_used", "==", true)
@@ -3321,12 +3682,14 @@ app.post("/signin", async (req, res) => {
     }
 
     for (const { durationType, licenseCode } of candidates) {
-      const licenseDoc = await db.collection("licenses").doc(licenseCode).get();
+      const licenseDoc = await licensesCol(appId).doc(licenseCode).get();
       if (!licenseDoc.exists) continue;
 
       const data = licenseDoc.data();
       const tier = resolveTier(data);
       let expiresAt = null;
+      let holderRef = licenseDoc.ref; // سندی که کلید دستگاه روش ذخیره می‌شه
+      let holderData = data;
 
       if (data.is_shared) {
         const userDoc = await licenseDoc.ref
@@ -3334,6 +3697,8 @@ app.post("/signin", async (req, res) => {
           .doc(safeId)
           .get();
         if (!userDoc.exists) continue;
+        holderRef = userDoc.ref;
+        holderData = userDoc.data();
         expiresAt = userDoc.data().expires_at
           ? userDoc.data().expires_at.toMillis()
           : null;
@@ -3346,6 +3711,51 @@ app.post("/signin", async (req, res) => {
         )
           continue;
         expiresAt = data.expires_at ? data.expires_at.toMillis() : null;
+      }
+
+      // ── مترونوم: کلید این دستگاه باید با کلید ثبت‌شده روی لایسنس بخونه ──
+      if (needsKey) {
+        if (holderData.devicePublicKey) {
+          if (!sameDeviceKey(holderData.devicePublicKey, clientPublicKey)) {
+            keyMismatch = true;
+            continue;
+          }
+        } else {
+          // لایسنس قدیمی/خرید فروشگاهی بدون کلید → به این دستگاه گره می‌خوره
+          await holderRef
+            .update({ devicePublicKey: clientPublicKey })
+            .catch((e) => console.error("signin: ثبت کلید دستگاه ناموفق:", e));
+        }
+
+        // ── Play Integrity: اگه از آخرین تایید بیشتر از RECHECK گذشته، اپ باید
+        //    دوباره توکن بده (اپ همون درخواست امضاشده رو با integrityToken تکرار می‌کنه)
+        if (PLAY_INTEGRITY_MODE === "enforce") {
+          const last =
+            holderData.integrityVerifiedAt && holderData.integrityVerifiedAt.toMillis
+              ? holderData.integrityVerifiedAt.toMillis()
+              : 0;
+          if (Date.now() - last > PLAY_INTEGRITY_RECHECK_MS) {
+            if (!req.body.integrityToken) {
+              return res.status(200).json({ status: "integrity_required", versionInfo });
+            }
+            const ig = await enforceIntegrity({
+              appId,
+              fingerprint,
+              action: "signin",
+              publicKey: clientPublicKey,
+              challenge: req.body.challenge,
+              token: req.body.integrityToken,
+            });
+            if (!ig.pass) {
+              return res.status(200).json({ status: "integrity_failed", versionInfo });
+            }
+            if (ig.verified) {
+              holderRef
+                .update({ integrityVerifiedAt: admin.firestore.FieldValue.serverTimestamp() })
+                .catch((e) => console.error("signin: ثبت integrityVerifiedAt ناموفق:", e));
+            }
+          }
+        }
       }
 
       // ── لایسنس استردادشده (revoked) یا خرید مایکتِ مسترد‌شده ──────────────
@@ -3468,7 +3878,10 @@ app.post("/signin", async (req, res) => {
       });
     }
 
-    return res.status(200).json({ status: "signup_required", versionInfo });
+    return res.status(200).json({
+      status: keyMismatch ? "device_key_mismatch" : "signup_required",
+      versionInfo,
+    });
   } catch (err) {
     console.error("خطا در signin:", err);
     return res.status(500).json({ status: "error", error: "Server error" });
@@ -3505,8 +3918,25 @@ app.post("/logout", async (req, res) => {
       return res.status(400).json({ error: "Unknown appId" });
     }
 
+    // ── مترونوم: بدون اثبات کلید دستگاه نمی‌شه لایسنس رو آزاد کرد ──────────
+    const needsKey = requiresDeviceKey(appId);
+    const clientPublicKey = needsKey ? req.body.publicKey : null;
+    if (
+      needsKey &&
+      !verifyDeviceProof({
+        appId,
+        fingerprint,
+        action: "logout",
+        publicKey: clientPublicKey,
+        challenge: req.body.challenge,
+        signature: req.body.signature,
+      })
+    ) {
+      return res.status(400).json(DEVICE_PROOF_ERR);
+    }
+
     const licenseCode = rawLicenseCode.trim().toUpperCase();
-    const licenseRef = db.collection("licenses").doc(licenseCode);
+    const licenseRef = licensesCol(appId).doc(licenseCode);
     const licenseDoc = await licenseRef.get();
 
     if (!licenseDoc.exists) {
@@ -3537,6 +3967,16 @@ app.post("/logout", async (req, res) => {
           .status(403)
           .json({ error: "This license is not linked to this device" });
       }
+      if (
+        needsKey &&
+        userDoc.data().devicePublicKey &&
+        !sameDeviceKey(userDoc.data().devicePublicKey, clientPublicKey)
+      ) {
+        return res.status(403).json({
+          error: DEVICE_KEY_MISMATCH_MSG,
+          code: "DEVICE_KEY_MISMATCH",
+        });
+      }
       // هیچ حذفی روی userRef انجام نمی‌شه؛ فقط پاک‌سازی لینک دستگاه
       // (links.5days) پایین‌تر انجام می‌شه.
       console.log(
@@ -3561,9 +4001,19 @@ app.post("/logout", async (req, res) => {
           ) {
             throw Object.assign(new Error("not-owner"), { isLogoutErr: true });
           }
+          if (
+            needsKey &&
+            freshData.devicePublicKey &&
+            !sameDeviceKey(freshData.devicePublicKey, clientPublicKey)
+          ) {
+            throw Object.assign(new Error("key-mismatch"), {
+              isLogoutErr: true,
+            });
+          }
 
           tx.update(licenseRef, {
             is_used: false,
+            devicePublicKey: admin.firestore.FieldValue.delete(),
             fingerprint: admin.firestore.FieldValue.delete(),
             appId: admin.firestore.FieldValue.delete(),
             activated_at: admin.firestore.FieldValue.delete(),
@@ -3574,6 +4024,12 @@ app.post("/logout", async (req, res) => {
         if (err.isLogoutErr) {
           if (err.message === "not-found") {
             return res.status(404).json({ error: "Invalid license code" });
+          }
+          if (err.message === "key-mismatch") {
+            return res.status(403).json({
+              error: DEVICE_KEY_MISMATCH_MSG,
+              code: "DEVICE_KEY_MISMATCH",
+            });
           }
           return res
             .status(403)
@@ -3796,7 +4252,7 @@ app.post("/admin/mark-paid", requireAdmin, async (req, res) => {
         .json({ status: "error", error: "licenseCode الزامی است" });
     }
     const licenseCode = rawLicenseCode.trim().toUpperCase();
-    const licenseRef = db.collection("licenses").doc(licenseCode);
+    const licenseRef = await resolveLicenseRef(licenseCode, req.body?.appId);
 
     const result = await db.runTransaction(async (tx) => {
       const licenseDoc = await tx.get(licenseRef);
@@ -3909,7 +4365,7 @@ app.post("/admin/set-tier", requireAdmin, async (req, res) => {
       });
     }
     const licenseCode = rawCode.trim().toUpperCase();
-    const ref = db.collection("licenses").doc(licenseCode);
+    const ref = await resolveLicenseRef(licenseCode, req.body?.appId);
     const doc = await ref.get();
     if (!doc.exists) {
       return res
@@ -3950,7 +4406,7 @@ app.post("/admin/purge-license", requireAdmin, async (req, res) => {
         .json({ status: "error", error: "licenseCode الزامی است" });
     }
     const licenseCode = rawCode.trim().toUpperCase();
-    const licRef = db.collection("licenses").doc(licenseCode);
+    const licRef = await resolveLicenseRef(licenseCode, req.body?.appId);
     const licSnap = await licRef.get();
 
     if (licSnap.exists && licSnap.data().is_shared === true) {
@@ -4003,6 +4459,40 @@ app.post("/admin/purge-license", requireAdmin, async (req, res) => {
     return res.status(200).json({ status: "ok", licenseCode, ...result });
   } catch (err) {
     console.error("خطا در purge-license:", err);
+    return res.status(500).json({ status: "error", error: "Server error" });
+  }
+});
+
+// ── ریست کلید دستگاه یک لایسنس (فقط ادمین) ─────────────────────────────
+// کلید Keystore با حذف اپ/پاک‌کردن دیتا/ریست گوشی از بین می‌ره، ولی
+// fingerprint (ANDROID_ID) ممکنه همون بمونه؛ در این حالت کاربر واقعی با
+// DEVICE_KEY_MISMATCH قفل می‌شه. بعد از احراز هویت خریدار، این مسیر فقط
+// devicePublicKey رو پاک می‌کنه؛ اولین ساین‌این بعدی با کلید جدید، لایسنس رو
+// دوباره به همون دستگاه گره می‌زنه (لایسنس آزاد نمی‌شه).
+// body: { licenseCode, appId? }
+app.post("/admin/reset-device-key", requireAdmin, async (req, res) => {
+  try {
+    const rawCode = req.body?.licenseCode;
+    if (!rawCode || typeof rawCode !== "string") {
+      return res
+        .status(400)
+        .json({ status: "error", error: "licenseCode الزامی است" });
+    }
+    const licenseCode = rawCode.trim().toUpperCase();
+    const ref = await resolveLicenseRef(licenseCode, req.body?.appId);
+    const doc = await ref.get();
+    if (!doc.exists) {
+      return res
+        .status(404)
+        .json({ status: "error", error: "کد لایسنس پیدا نشد" });
+    }
+    await ref.update({
+      devicePublicKey: admin.firestore.FieldValue.delete(),
+      deviceKeyResetAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    return res.status(200).json({ status: "ok", licenseCode });
+  } catch (err) {
+    console.error("خطا در reset-device-key:", err);
     return res.status(500).json({ status: "error", error: "Server error" });
   }
 });
