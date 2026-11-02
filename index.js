@@ -517,14 +517,14 @@ function isValidAppId(appId) {
 // ════════════════════════════════════════════════════════════════════════
 //  کالکشن جداگانه‌ی لایسنس‌های اپ مترونوم (MetroPro)
 // ════════════════════════════════════════════════════════════════════════
-// لایسنس‌های مترونوم توی کالکشن «metonome_Licenses» نگه داشته می‌شن، نه
+// لایسنس‌های مترونوم توی کالکشن «metronome_Licenses» نگه داشته می‌شن، نه
 // «licenses» (که مال BuskitTools و بقیه‌ی اپ‌هاست). ساختار سند دقیقاً مثل
 // licenses هست (docId = خود کد لایسنس). انتخاب کالکشن فقط بر اساس appId
 // درخواست انجام می‌شه. اگه applicationId مترونوم عوض شد، همین‌جا اضافه‌ش کن.
-// ⚠️ اسم کالکشن عمداً همون چیزیه که خواستی (metonome، بدون r)؛ اگه بعداً
+// ⚠️ اسم کالکشن عمداً همون چیزیه که خواستی (metronome، بدون r)؛ اگه بعداً
 // خواستی اصلاحش کنی فقط همین یک ثابت رو عوض کن.
 const METRONOME_APP_IDS = new Set(["com.buskit.metronome"]);
-const METRONOME_LICENSES_COLLECTION = "metonome_Licenses";
+const METRONOME_LICENSES_COLLECTION = "metronome_Licenses";
 
 function licensesCol(appId) {
   return db.collection(
@@ -533,7 +533,7 @@ function licensesCol(appId) {
 }
 
 // برای مسیرهای ادمین که فقط licenseCode می‌گیرن (appId اختیاری): اگه appId
-// بیاد همون تعیین‌کننده‌ست، وگرنه اول licenses و بعد metonome_Licenses چک می‌شه.
+// بیاد همون تعیین‌کننده‌ست، وگرنه اول licenses و بعد metronome_Licenses چک می‌شه.
 async function resolveLicenseRef(licenseCode, appId) {
   if (appId) return licensesCol(appId).doc(licenseCode);
   const main = db.collection("licenses").doc(licenseCode);
@@ -589,7 +589,8 @@ function isChallengeValid(challenge) {
 }
 
 function parseDevicePublicKey(publicKeyB64) {
-  if (typeof publicKeyB64 !== "string" || publicKeyB64.length > 400) return null;
+  if (typeof publicKeyB64 !== "string" || publicKeyB64.length > 400)
+    return null;
   try {
     const keyObj = crypto.createPublicKey({
       key: Buffer.from(publicKeyB64, "base64"),
@@ -610,7 +611,14 @@ function parseDevicePublicKey(publicKeyB64) {
 
 // true فقط اگه: کلید عمومی معتبر EC P-256 باشه، challenge ما و تازه باشه،
 // و امضا (SHA256withECDSA، DER) روی پیام درست با همون کلید جور دربیاد.
-function verifyDeviceProof({ appId, fingerprint, action, publicKey, challenge, signature }) {
+function verifyDeviceProof({
+  appId,
+  fingerprint,
+  action,
+  publicKey,
+  challenge,
+  signature,
+}) {
   try {
     const keyObj = parseDevicePublicKey(publicKey);
     if (!keyObj || !isChallengeValid(challenge)) return false;
@@ -650,7 +658,6 @@ app.post("/challenge", (req, res) => {
   }
   return res.status(200).json({ challenge: createChallenge() });
 });
-
 
 // ════════════════════════════════════════════════════════════════════════
 //  کد تخفیف سایت → رزرو لایسنس واقعی (Buskit-Tools purchase form)
@@ -3295,7 +3302,9 @@ app.post("/activate", async (req, res) => {
             }
             if (needsKey) {
               if (freshData.devicePublicKey) {
-                if (!sameDeviceKey(freshData.devicePublicKey, clientPublicKey)) {
+                if (
+                  !sameDeviceKey(freshData.devicePublicKey, clientPublicKey)
+                ) {
                   throw Object.assign(new Error("key-mismatch"), {
                     isActivateErr: true,
                   });
@@ -3489,7 +3498,11 @@ app.post("/signin", async (req, res) => {
       const seen = new Set();
       const lifetimeList = [];
       const lifeSnap = await db
-        .collection(METRONOME_APP_IDS.has(appId) ? METRONOME_LICENSES_COLLECTION : "licenses")
+        .collection(
+          METRONOME_APP_IDS.has(appId)
+            ? METRONOME_LICENSES_COLLECTION
+            : "licenses",
+        )
         .where("fingerprint", "==", fingerprint)
         .where("appId", "==", appId)
         .where("is_used", "==", true)
