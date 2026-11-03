@@ -523,7 +523,8 @@ function isValidAppId(appId) {
 // درخواست انجام می‌شه. اگه applicationId مترونوم عوض شد، همین‌جا اضافه‌ش کن.
 // ⚠️ اسم کالکشن عمداً همون چیزیه که خواستی (metronome، بدون r)؛ اگه بعداً
 // خواستی اصلاحش کنی فقط همین یک ثابت رو عوض کن.
-const METRONOME_APP_IDS = new Set(["com.buskit.metronome"]);
+// const METRONOME_APP_IDS = new Set(["com.buskit.metronome"]);
+const METRONOME_APP_IDS = new Set(["com.BuskitApps"]);
 const METRONOME_LICENSES_COLLECTION = "metronome_Licenses";
 
 function licensesCol(appId) {
