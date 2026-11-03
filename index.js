@@ -792,6 +792,14 @@ const GOOGLE_PLAY_SKU_LICENSE_MAP = {
     license_type: "lifetime",
     appGeneration: "v1",
   },
+  // ── مترونوم (appId: com.buskit.metronome): خرید مادام‌العمر درون‌برنامه‌ای ──
+  //    باید دقیقاً همون Product ID محصول «One-time» توی Play Console اپ مترونوم
+  //    باشه. لایسنس در کالکشن metronome_Licenses ساخته می‌شه (licensesCol).
+  buskit_metronome: {
+    tier: "pro",
+    license_type: "lifetime",
+    appGeneration: "v1",
+  },
   // ── محصول‌های «ارتقا» (قیمت = اختلاف دو سطح). لایسنس جدید نمی‌سازن؛ سطحِ
   //    همون لایسنسِ فعلیِ دستگاه رو بالا می‌برن. upgradeFrom = سطحی که کاربر
   //    باید همین الان داشته باشه. ─────────────────────────────────────────
@@ -2411,6 +2419,13 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
         .json({ success: false, code: "UNKNOWN_APP", error: "Unknown appId" });
     }
 
+    // ── کلید سخت‌افزاری دستگاه (مترونوم اجباری؛ Tools اختیاری) ───────────
+    // لایسنسِ تازه‌ساخته‌شده از همون لحظه‌ی خرید به کلید این دستگاه گره می‌خوره.
+    const proof = readDeviceProof(req.body, appId, fingerprint, "purchase");
+    if (proof.invalid) {
+      return res.status(400).json({ success: false, ...DEVICE_PROOF_ERR });
+    }
+
     const info = GOOGLE_PLAY_SKU_LICENSE_MAP[productId];
     if (!info) {
       console.error(`گوگل پلی: productId ناشناخته (${productId})`);
@@ -2646,6 +2661,7 @@ app.post("/googleplay/verify-purchase", async (req, res) => {
         appId,
         hardwareSignature: hardwareSignature || null,
         source: "google_play",
+        ...(proof.needsKey ? { devicePublicKey: proof.clientPublicKey } : {}),
         google_play_product_id: productId,
         google_play_purchase_token: purchaseToken,
         google_play_verified_at: admin.firestore.FieldValue.serverTimestamp(),
